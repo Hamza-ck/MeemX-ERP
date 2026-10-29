@@ -4,18 +4,9 @@ import {
   ChevronLeft,
   Save,
   UserPlus,
-  Send,
-  Download,
-  Database,
   Check,
-  User,
-  Shield,
   MessageCircle,
-  X,
-  Building,
-  RotateCcw,
   KeyRound,
-  Activity,
 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { accDb } from '../lib/accountingDb'
@@ -39,8 +30,8 @@ export default function SettingsControlPage() {
   const activeTabParam = searchParams.get('tab')
 
   const [localShopName, setLocalShopName] = useState(shopName)
-  const [localOwnerPin, setLocalOwnerPin] = useState(ownerPin || '1234')
-  const [localAdminPin, setLocalAdminPin] = useState(adminPin || '8888')
+  const [localOwnerPin, setLocalOwnerPin] = useState(ownerPin || '')
+  const [localAdminPin, setLocalAdminPin] = useState(adminPin || '')
   const [invoiceFooter, setInvoiceFooter] = useState('Thank you for your business')
   const [whatsappSummary, setWhatsappSummary] = useState(true)
   const [sendAtTime, setSendAtTime] = useState('8:00 PM')
@@ -49,6 +40,7 @@ export default function SettingsControlPage() {
   const [backupStatus, setBackupStatus] = useState('Last backup: today, 6:45 PM')
   const [backupRunning, setBackupRunning] = useState(false)
   const [saveSuccess, setSaveSuccess] = useState(false)
+  const [saveError, setSaveError] = useState('')
   const [addUserOpen, setAddUserOpen] = useState(false)
   const [editingUser, setEditingUser] = useState(null)
   const [whatsappSent, setWhatsappSent] = useState(false)
@@ -58,11 +50,11 @@ export default function SettingsControlPage() {
   }, [shopName])
 
   useEffect(() => {
-    setLocalOwnerPin(ownerPin || '1234')
+    setLocalOwnerPin(ownerPin || '')
   }, [ownerPin])
 
   useEffect(() => {
-    setLocalAdminPin(adminPin || '8888')
+    setLocalAdminPin(adminPin || '')
   }, [adminPin])
 
   const handleToggle = (key) => {
@@ -70,14 +62,19 @@ export default function SettingsControlPage() {
   }
 
   const handleSaveAll = async () => {
-    if (localShopName.trim()) {
-      await updateShopName(localShopName.trim())
+    setSaveError('')
+    try {
+      if (localShopName.trim()) {
+        await updateShopName(localShopName.trim())
+      }
+      if (localOwnerPin !== (ownerPin || '') || localAdminPin !== (adminPin || '')) {
+        await updatePins({ newOwnerPin: localOwnerPin, newAdminPin: localAdminPin })
+      }
+      setSaveSuccess(true)
+      setTimeout(() => setSaveSuccess(false), 2500)
+    } catch (error) {
+      setSaveError(error.message || 'Could not save these settings.')
     }
-    if (localOwnerPin && localAdminPin) {
-      await updatePins({ newOwnerPin: localOwnerPin, newAdminPin: localAdminPin })
-    }
-    setSaveSuccess(true)
-    setTimeout(() => setSaveSuccess(false), 2500)
   }
 
   const handleBackupNow = () => {
@@ -137,10 +134,12 @@ export default function SettingsControlPage() {
       const debtors = allParties.filter((p) => (p.role === 'customer' || p.role === 'debtor') && Number(p.current_balance) > 0)
       const topDebtor = debtors.sort((a, b) => Number(b.current_balance) - Number(a.current_balance))[0]
 
-      const stockVal = allMaterials.reduce(
-        (sum, m) => sum + (Number(m.current_qty) || 0) * (Number(m.purchase_rate || m.sales_rate) || 0),
-        0
-      )
+      const stockVal = allMaterials.reduce((sum, material) => {
+        if (material.current_value != null && Number.isFinite(Number(material.current_value))) {
+          return sum + Number(material.current_value)
+        }
+        return sum + (Number(material.current_qty) || 0) * (Number(material.purchase_rate) || 0)
+      }, 0)
 
       const summaryText = encodeURIComponent(
         `📊 *Daily Business Summary - ${localShopName}*\n\n` +
@@ -200,6 +199,7 @@ export default function SettingsControlPage() {
             {saveSuccess ? 'Saved! ✓' : 'Save changes'}
           </button>
         </header>
+        {saveError && <p role="alert" className="mb-4 text-right text-xs font-semibold text-rose-700">{saveError}</p>}
 
         {/* 2-Column Layout matching PDF Page 14 */}
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -371,16 +371,18 @@ export default function SettingsControlPage() {
             >
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-base font-extrabold text-[#11382f]">
-                  Users and access
+                  Local device PINs
                 </h2>
                 <span className="rounded-lg bg-[#eef6f2] px-2.5 py-0.5 text-[11px] font-bold text-[#0e655d]">
-                  {teamUsers.length} {teamUsers.length === 1 ? 'user' : 'users'}
+                  {teamUsers.length} {teamUsers.length === 1 ? 'PIN' : 'PINs'}
                 </span>
               </div>
 
+              <p className="mb-3 text-xs leading-relaxed text-[#6b867e]">
+                These PINs only unlock this device after account sign-in. Account roles come from the user profile.
+              </p>
               <div className="divide-y divide-[#edf3f0] space-y-3">
                 {teamUsers.map((u) => {
-                  const isUserAdmin = u.role === 'admin'
                   return (
                     <div key={u.id} className="flex items-center justify-between pt-3 first:pt-1">
                       <div className="min-w-0 pr-2">
@@ -389,7 +391,7 @@ export default function SettingsControlPage() {
                             {u.name}
                           </strong>
                           <span className="inline-flex items-center gap-1 rounded-md bg-[#f2f7f4] px-1.5 py-0.5 font-mono text-[10px] font-bold text-[#44655b]">
-                            <KeyRound size={10} /> {u.pin}
+                            <KeyRound size={10} /> PIN configured
                           </span>
                         </div>
                         <span className="block text-[11px] text-[#708d83] mt-0.5">
@@ -398,14 +400,8 @@ export default function SettingsControlPage() {
                       </div>
 
                       <div className="flex items-center gap-2 shrink-0">
-                        <span
-                          className={`rounded-xl px-2.5 py-1 text-[11px] font-bold ${
-                            isUserAdmin
-                              ? 'bg-[#0d6e63] text-white'
-                              : 'bg-[#e4f3eb] text-[#0d7568]'
-                          }`}
-                        >
-                          {u.roleLabel || (isUserAdmin ? 'Admin' : 'Owner · view only')}
+                        <span className="rounded-xl bg-[#e4f3eb] px-2.5 py-1 text-[11px] font-bold text-[#0d7568]">
+                          Local PIN
                         </span>
                         <button
                           type="button"
@@ -590,44 +586,48 @@ export default function SettingsControlPage() {
               </div>
             </section>
 
-            {/* 4-Digit Security PINs */}
+            {/* Local device unlock codes */}
             <section className="rounded-3xl border border-[#e1e9e3] bg-white p-5 sm:p-6 shadow-xs">
               <h2 className="text-base font-extrabold text-[#11382f] mb-2">
-                4-Digit Security PINs
+                Device unlock PINs
               </h2>
               <p className="text-[11px] text-[#6d8880] mb-4">
-                Set default 4-digit passcodes for instant Owner and Admin console access.
+                Optional local lock after account sign-in. No PIN is enabled until you choose one; 1234 and 8888 are not accepted.
               </p>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-bold text-[#44655b] mb-1">
-                    Owner 4-Digit PIN
+                    Device PIN 1
                   </label>
                   <input
-                    type="text"
+                    type="password"
+                    inputMode="numeric"
+                    autoComplete="new-password"
                     maxLength={4}
                     pattern="[0-9]*"
+                    placeholder="Optional"
                     className="w-full rounded-xl border border-[#d8e3de] px-3.5 py-2.5 text-center font-mono text-sm font-extrabold tracking-widest text-[#11382f] outline-none focus:border-[#0e655d]"
                     value={localOwnerPin}
                     onChange={(e) => setLocalOwnerPin(e.target.value.replace(/[^0-9]/g, ''))}
                   />
-                  <span className="mt-1 block text-[10px] text-[#718d84]">Default: 1234</span>
                 </div>
 
                 <div>
                   <label className="block text-xs font-bold text-[#44655b] mb-1">
-                    Admin 4-Digit PIN
+                    Device PIN 2
                   </label>
                   <input
-                    type="text"
+                    type="password"
+                    inputMode="numeric"
+                    autoComplete="new-password"
                     maxLength={4}
                     pattern="[0-9]*"
+                    placeholder="Optional"
                     className="w-full rounded-xl border border-[#d8e3de] px-3.5 py-2.5 text-center font-mono text-sm font-extrabold tracking-widest text-[#11382f] outline-none focus:border-[#0e655d]"
                     value={localAdminPin}
                     onChange={(e) => setLocalAdminPin(e.target.value.replace(/[^0-9]/g, ''))}
                   />
-                  <span className="mt-1 block text-[10px] text-[#718d84]">Default: 8888</span>
                 </div>
               </div>
             </section>

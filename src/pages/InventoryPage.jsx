@@ -6,9 +6,6 @@ import {
   FileSpreadsheet,
   Edit3,
   X,
-  AlertCircle,
-  TrendingDown,
-  CheckCircle,
 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import Nav from '../components/Nav'
@@ -50,8 +47,10 @@ export default function InventoryPage() {
   const totalStockValue = useMemo(() => {
     return items.reduce((acc, it) => {
       const qty = Number(it.current_qty) || 0
-      const rate = Number(it.sales_rate) || Number(it.purchase_rate) || 0
-      return acc + qty * rate
+      const costValue = it.current_value != null && Number.isFinite(Number(it.current_value))
+        ? Number(it.current_value)
+        : qty * (Number(it.purchase_rate) || 0)
+      return acc + costValue
     }, 0)
   }, [items])
 
@@ -189,6 +188,9 @@ export default function InventoryPage() {
                 : 'bg-[#e3f3ed] text-[#157a6c]'
               const barFill = isZero ? 'bg-[#b84825]' : isLow ? 'bg-[#c05423]' : 'bg-[#157a6c]'
               const barWidth = isZero ? '0%' : `${Math.min(100, Math.max(10, Math.round((qty / (thresh * 3)) * 100)))}%`
+              const itemValue = item.current_value != null && Number.isFinite(Number(item.current_value))
+                ? Number(item.current_value)
+                : qty * (Number(item.purchase_rate) || 0)
 
               return (
                 <article
@@ -215,6 +217,9 @@ export default function InventoryPage() {
                       >
                         {status}
                       </span>
+                      <span className="mt-1 block text-[11px] font-semibold text-[#718d84]">
+                        Stock value ₹{itemValue.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                      </span>
                     </div>
                   </div>
 
@@ -226,28 +231,30 @@ export default function InventoryPage() {
                     />
                   </div>
 
-                  <div className="mt-3 flex items-center justify-between">
-                    <button
-                      type="button"
-                      onClick={() => setEditingMaterial(item)}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-[#cfded6] bg-[#f8faf9] px-2.5 py-1 text-[11px] font-bold text-[#0e655d] hover:bg-[#ebf3ef]"
-                      title="Admin Edit item master"
-                    >
-                      <Edit3 size={12} />
-                      <span>Edit item</span>
-                    </button>
+                  {isAdmin && (
+                    <div className="mt-3 flex items-center justify-between">
+                      <button
+                        type="button"
+                        onClick={() => setEditingMaterial(item)}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-[#cfded6] bg-[#f8faf9] px-2.5 py-1 text-[11px] font-bold text-[#0e655d] hover:bg-[#ebf3ef]"
+                        title="Edit item master"
+                      >
+                        <Edit3 size={12} />
+                        <span>Edit item</span>
+                      </button>
 
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAdjustModal(item)
-                        setNewQty(String(qty))
-                      }}
-                      className="text-[11px] font-bold text-[#0e655d] hover:underline"
-                    >
-                      Adjust stock quantity
-                    </button>
-                  </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAdjustModal(item)
+                          setNewQty(String(qty))
+                        }}
+                        className="text-[11px] font-bold text-[#0e655d] hover:underline"
+                      >
+                        Adjust stock quantity
+                      </button>
+                    </div>
+                  )}
                 </article>
               )
             })
@@ -271,7 +278,7 @@ export default function InventoryPage() {
         />
 
         {/* Adjust Stock Quantity Modal */}
-        {adjustModal && (
+        {isAdmin && adjustModal && (
           <div
             className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs"
             onClick={() => setAdjustModal(null)}

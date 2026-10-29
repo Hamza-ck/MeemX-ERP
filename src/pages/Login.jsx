@@ -1,14 +1,17 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Delete, Shield, UserCheck, AlertCircle, Lock, Check } from 'lucide-react'
+import { Delete, AlertCircle, LogOut } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 
 export default function Login() {
   const [pin, setPin] = useState('')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [shaking, setShaking] = useState(false)
   const navigate = useNavigate()
-  const { unlockWithPin, ownerPin, adminPin, teamUsers, isAuthenticated } = useAuth()
+  const { signIn, signOut, unlockWithPin, hasSession, isPinLocked, isAuthenticated } = useAuth()
 
   // If already authenticated, redirect to home
   useEffect(() => {
@@ -17,42 +20,7 @@ export default function Login() {
     }
   }, [isAuthenticated, navigate])
 
-  // Listen to physical keyboard events
-  useEffect(() => {
-    function handleKeyDown(e) {
-      if (/^[0-9]$/.test(e.key)) {
-        handleDigit(e.key)
-      } else if (e.key === 'Backspace') {
-        handleBackspace()
-      }
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [pin])
-
-  const handleDigit = (digit) => {
-    if (pin.length >= 4) return
-    const nextPin = pin + digit
-    setPin(nextPin)
-    setError('')
-
-    // Automatically check when 4th digit is typed
-    if (nextPin.length === 4) {
-      validatePin(nextPin)
-    }
-  }
-
-  const handleBackspace = () => {
-    setError('')
-    setPin((prev) => prev.slice(0, -1))
-  }
-
-  const handleClear = () => {
-    setError('')
-    setPin('')
-  }
-
-  const validatePin = (inputPin) => {
+  const validatePin = useCallback((inputPin) => {
     const result = unlockWithPin(inputPin)
     if (result.success) {
       navigate('/')
@@ -64,11 +32,90 @@ export default function Login() {
         setPin('')
       }, 700)
     }
+  }, [unlockWithPin, navigate])
+
+  const handleDigit = useCallback((digit) => {
+    if (pin.length >= 4) return
+    const nextPin = pin + digit
+    setPin(nextPin)
+    setError('')
+
+    if (nextPin.length === 4) validatePin(nextPin)
+  }, [pin, validatePin])
+
+  const handleBackspace = useCallback(() => {
+    setError('')
+    setPin((prev) => prev.slice(0, -1))
+  }, [])
+
+  const handleClear = () => {
+    setError('')
+    setPin('')
   }
 
-  const handleQuickUnlock = (code) => {
-    setPin(code)
-    validatePin(code)
+  // Listen to physical keyboard events while the local PIN lock is visible.
+  useEffect(() => {
+    function handleKeyDown(event) {
+      if (!isPinLocked) return
+      if (/^[0-9]$/.test(event.key)) handleDigit(event.key)
+      else if (event.key === 'Backspace') handleBackspace()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [pin, isPinLocked, handleDigit, handleBackspace])
+
+  const handleSignIn = async (event) => {
+    event.preventDefault()
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await signIn(email, password)
+      if (!result.success) setError(result.error)
+    } catch (err) {
+      setError(err.message || 'Could not sign in. Try again.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  if (!hasSession) {
+    return (
+      <main className="grid min-h-screen place-items-center bg-[#f4f7f4] p-4 sm:p-6">
+        <div className="w-full max-w-[360px]">
+          <div className="mx-auto mb-5 grid h-16 w-16 place-items-center rounded-2xl bg-[#0e655d] text-2xl font-black text-white shadow-md">M</div>
+          <h1 className="text-center text-[26px] font-extrabold tracking-tight text-[#11382f]">Sign in to MEEMX</h1>
+          <p className="mb-6 mt-1 text-center text-xs font-medium text-[#6c877e]">Use your business account to continue</p>
+          <form onSubmit={handleSignIn} className="space-y-4 rounded-3xl border border-[#e1e9e3] bg-white p-5 shadow-[0_16px_48px_rgba(14,101,93,0.06)]">
+            <label className="block text-xs font-bold text-[#35584e]">
+              Email
+              <input
+                type="email"
+                autoComplete="username"
+                required
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                className="mt-1.5 w-full rounded-xl border border-[#d9e5df] bg-[#fafcfb] px-3 py-3 text-sm text-[#173d33] outline-none focus:border-[#0e655d] focus:ring-2 focus:ring-[#0e655d]/15"
+              />
+            </label>
+            <label className="block text-xs font-bold text-[#35584e]">
+              Password
+              <input
+                type="password"
+                autoComplete="current-password"
+                required
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                className="mt-1.5 w-full rounded-xl border border-[#d9e5df] bg-[#fafcfb] px-3 py-3 text-sm text-[#173d33] outline-none focus:border-[#0e655d] focus:ring-2 focus:ring-[#0e655d]/15"
+              />
+            </label>
+            {error && <p role="alert" className="flex items-center gap-1.5 text-xs font-semibold text-[#b83e29]"><AlertCircle size={15} />{error}</p>}
+            <button disabled={submitting} className="w-full rounded-xl bg-[#0e655d] py-3 text-sm font-extrabold text-white transition hover:bg-[#0a4f49] disabled:opacity-60">
+              {submitting ? 'Signing in…' : 'Sign in'}
+            </button>
+          </form>
+        </div>
+      </main>
+    )
   }
 
   return (
@@ -84,7 +131,7 @@ export default function Login() {
           Enter 4-Digit PIN
         </h1>
         <p className="mt-1 text-xs font-medium text-[#6c877e]">
-          Quick secure access for Owner or Admin
+          Enter your local PIN to unlock this device
         </p>
 
         {/* 4-Digit PIN Indicators */}
@@ -165,41 +212,10 @@ export default function Login() {
             </button>
           </div>
 
-          {/* Quick PIN Chips for Team Users */}
-          <div className="mt-5 pt-4 border-t border-[#edf3f0]">
-            <p className="text-[11px] font-bold text-[#68857d] mb-2.5">
-              Quick Access PINs
-            </p>
-            <div className="grid grid-cols-2 gap-2">
-              {(teamUsers && teamUsers.length > 0
-                ? teamUsers
-                : [
-                    { id: 'o', name: 'Owner', role: 'owner', pin: ownerPin },
-                    { id: 'a', name: 'Admin', role: 'admin', pin: adminPin },
-                  ]
-              ).map((u) => {
-                const isAdminRole = u.role === 'admin'
-                return (
-                  <button
-                    key={u.id}
-                    type="button"
-                    onClick={() => handleQuickUnlock(u.pin)}
-                    className={`flex items-center justify-center gap-1.5 rounded-xl px-2.5 py-2 text-xs font-bold transition active:scale-95 truncate ${
-                      isAdminRole
-                        ? 'bg-[#0e655d] text-white shadow-2xs hover:bg-[#0a4f49]'
-                        : 'border border-[#cbe2d8] bg-[#f8faf9] text-[#145347] hover:bg-[#eef7f3]'
-                    }`}
-                  >
-                    {isAdminRole ? <Shield size={13} className="shrink-0" /> : <UserCheck size={13} className="shrink-0" />}
-                    <span className="truncate">
-                      {u.name === 'You' ? 'Admin' : u.name} ({u.pin})
-                    </span>
-                  </button>
-                )
-              })}
-            </div>
-          </div>
         </div>
+        <button type="button" onClick={() => signOut()} className="mx-auto mt-4 flex items-center gap-1.5 text-xs font-bold text-[#6c857d] hover:text-[#ba3b2a]">
+          <LogOut size={14} /> Sign out of account
+        </button>
       </div>
     </main>
   )

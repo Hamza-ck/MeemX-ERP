@@ -17,7 +17,6 @@ import {
   Printer,
 } from 'lucide-react'
 import { accDb, createVoucher, updateVoucher } from '../lib/accountingDb'
-import { useAuth } from '../context/AuthContext'
 
 export default function VoucherModal({
   isOpen,

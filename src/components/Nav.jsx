@@ -16,14 +16,13 @@ import {
   LogOut,
   X,
   FileSpreadsheet,
-  RotateCcw,
+  RefreshCw,
 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 
 export default function Nav() {
-  const { isAdmin, isOwner, setRole, shopName, signOut } = useAuth()
+  const { isAdmin, user, role, shopName, signOut, syncCloudNow, cloudSyncStatus, cloudSyncError } = useAuth()
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false)
-  const [roleModalOpen, setRoleModalOpen] = useState(false)
 
   // Overview links matching PDF Page 5 & Page 11
   const overviewLinks = [
@@ -39,7 +38,7 @@ export default function Nav() {
   // Control links for Admin matching PDF Page 11 & Page 14
   const controlLinks = [
     { to: '/tally', label: 'Imports', icon: Upload },
-    { to: '/settings?tab=users', label: 'Users & access', icon: UserCheck },
+    { to: '/settings?tab=users', label: 'Device PINs', icon: UserCheck },
     { to: '/settings', label: 'App settings', icon: Settings },
     { to: '/settings?tab=activity', label: 'Activity log', icon: Activity },
   ]
@@ -53,6 +52,14 @@ export default function Nav() {
   const mobileBottomLinkStyle = ({ isActive }) =>
     'flex flex-1 flex-col items-center justify-center py-1.5 px-2 rounded-2xl text-[10px] font-semibold transition no-underline ' +
     (isActive ? 'bg-[#dbeef4] text-[#0b5f55] font-bold shadow-xs' : 'text-[#58736a] hover:text-[#0b5f55]')
+
+  const syncStatusLabel = {
+    idle: 'Cloud sync is ready',
+    syncing: 'Syncing cloud data…',
+    synced: 'Cloud data is up to date',
+    pending: 'Local changes are waiting for an administrator sync',
+    error: cloudSyncError || 'Cloud sync needs attention',
+  }[cloudSyncStatus] || 'Cloud sync is ready'
 
   return (
     <>
@@ -75,37 +82,17 @@ export default function Nav() {
           </NavLink>
         </div>
 
-        {/* Quick Role Switcher Pill in Sidebar */}
-        <div className="mb-5 rounded-xl bg-[#082b26] p-1 flex items-center text-xs">
-          <button
-            type="button"
-            onClick={() => setRole('admin')}
-            className={`flex-1 py-1.5 rounded-lg font-bold text-center transition ${
-              isAdmin ? 'bg-[#0e7467] text-white shadow-sm' : 'text-[#87aba1] hover:text-white'
-            }`}
-          >
-            Admin view
-          </button>
-          <button
-            type="button"
-            onClick={() => setRole('owner')}
-            className={`flex-1 py-1.5 rounded-lg font-bold text-center transition ${
-              isOwner ? 'bg-[#0e7467] text-white shadow-sm' : 'text-[#87aba1] hover:text-white'
-            }`}
-          >
-            Owner view
-          </button>
-        </div>
-
         {/* Navigation Groups */}
         <div className="flex-1 overflow-y-auto space-y-5 pr-1">
-          <NavLink
-            to="/tally"
-            className="w-full flex items-center justify-center gap-2 rounded-2xl bg-[#0f7d6f] hover:bg-[#139181] text-white py-2.5 px-3 text-xs font-extrabold shadow-sm transition active:scale-98 no-underline"
-          >
-            <FileSpreadsheet size={16} strokeWidth={2.2} />
-            <span>Tally XML Import</span>
-          </NavLink>
+          {isAdmin && (
+            <NavLink
+              to="/tally"
+              className="w-full flex items-center justify-center gap-2 rounded-2xl bg-[#0f7d6f] hover:bg-[#139181] text-white py-2.5 px-3 text-xs font-extrabold shadow-sm transition active:scale-98 no-underline"
+            >
+              <FileSpreadsheet size={16} strokeWidth={2.2} />
+              <span>Tally XML Import</span>
+            </NavLink>
+          )}
 
           <div>
             <p className="mb-2 px-3 text-[10px] font-extrabold tracking-[1.2px] text-[#78a89a]">
@@ -147,16 +134,27 @@ export default function Nav() {
         {/* Footer info & Session */}
         <div className="mt-auto border-t border-white/10 pt-4">
           <div className="flex items-center justify-between px-2 mb-2">
-            <span className="text-[11px] text-[#86b5a8]">Updated 17 Oct, 6:40 PM</span>
-            <span className="inline-flex h-2 w-2 rounded-full bg-[#34d399]" title="Live online" />
+            <span className="truncate pr-2 text-[10px] text-[#86b5a8]" role="status" title={syncStatusLabel}>
+              {cloudSyncStatus === 'synced' ? 'Cloud synced' : cloudSyncStatus === 'syncing' ? 'Syncing…' : cloudSyncStatus === 'pending' ? 'Changes pending' : cloudSyncStatus === 'error' ? 'Sync needs attention' : 'Cloud sync ready'}
+            </span>
+            <button
+              type="button"
+              onClick={() => syncCloudNow()}
+              disabled={cloudSyncStatus === 'syncing'}
+              className="inline-flex shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-[10px] font-bold text-[#c8e7dc] hover:bg-white/10 disabled:opacity-60"
+              title={syncStatusLabel}
+            >
+              <RefreshCw size={11} className={cloudSyncStatus === 'syncing' ? 'animate-spin' : ''} />
+              Sync now
+            </button>
           </div>
           <div className="flex items-center justify-between rounded-xl bg-white/5 p-2 text-xs">
             <div className="min-w-0 pr-2">
               <span className="block truncate font-bold text-white text-[12px]">
-                {isAdmin ? 'Admin (You)' : 'A. Sharma (Owner)'}
+                {user?.name || 'Account'}
               </span>
               <span className="block text-[10px] text-[#89b3a6]">
-                {isAdmin ? 'Full control' : 'View only'}
+                {role === 'admin' ? 'Admin' : role === 'employee' ? 'Employee · view only' : 'Owner · view only'}
               </span>
             </div>
             <button
@@ -231,6 +229,17 @@ export default function Nav() {
               </button>
             </div>
             <div className="grid grid-cols-2 gap-2 mt-4">
+              <button
+                type="button"
+                onClick={() => syncCloudNow()}
+                disabled={cloudSyncStatus === 'syncing'}
+                title={syncStatusLabel}
+                className="col-span-2 flex items-center justify-center gap-2 rounded-2xl border border-[#c5dfd6] bg-[#eff7f3] p-3 text-xs font-bold text-[#0e655d] disabled:opacity-60"
+              >
+                <RefreshCw size={16} className={cloudSyncStatus === 'syncing' ? 'animate-spin' : ''} />
+                {cloudSyncStatus === 'syncing' ? 'Syncing…' : 'Sync cloud data'}
+                <span className="sr-only">{syncStatusLabel}</span>
+              </button>
               <NavLink
                 to="/creditors"
                 onClick={() => setMobileMoreOpen(false)}
@@ -252,28 +261,20 @@ export default function Nav() {
               >
                 <Banknote size={18} className="text-[#0d786d]" /> Loans & Adv.
               </NavLink>
-              <button
-                type="button"
-                onClick={() => {
-                  setMobileMoreOpen(false)
-                  setRole('admin')
-                }}
-                className="flex items-center gap-2.5 rounded-2xl border border-[#cae5db] bg-[#eef7f3] p-3 text-xs font-bold text-[#0c6b60] text-left"
-              >
-                <RotateCcw size={18} /> Switch to Admin
-              </button>
             </div>
 
-            <NavLink
-              to="/tally"
-              onClick={() => setMobileMoreOpen(false)}
-              className="mt-3 w-full flex items-center justify-center gap-2 rounded-2xl bg-[#0e655d] text-white p-3 text-xs font-extrabold shadow-xs transition active:scale-98 no-underline"
-            >
-              <FileSpreadsheet size={16} strokeWidth={2.2} />
-              <span>Tally XML Import</span>
-            </NavLink>
+            {isAdmin && (
+              <NavLink
+                to="/tally"
+                onClick={() => setMobileMoreOpen(false)}
+                className="mt-3 w-full flex items-center justify-center gap-2 rounded-2xl bg-[#0e655d] text-white p-3 text-xs font-extrabold shadow-xs transition active:scale-98 no-underline"
+              >
+                <FileSpreadsheet size={16} strokeWidth={2.2} />
+                <span>Tally XML Import</span>
+              </NavLink>
+            )}
             <div className="mt-4 pt-3 border-t border-[#e5ece8] flex items-center justify-between">
-              <span className="text-[11px] text-[#6e847c]">Logged in as Owner</span>
+              <span className="text-[11px] text-[#6e847c]">Signed in as {user?.name || 'Account'}</span>
               <button
                 type="button"
                 onClick={() => signOut()}
@@ -286,84 +287,6 @@ export default function Nav() {
         </div>
       )}
 
-      {/* Role Switcher Dialog when tapping avatar on mobile */}
-      {roleModalOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs lg:hidden"
-          onClick={() => setRoleModalOpen(false)}
-        >
-          <div
-            className="w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between pb-3 border-b border-[#e3ebe6]">
-              <h3 className="font-extrabold text-[16px] text-[#143d35]">Switch View Mode</h3>
-              <button
-                type="button"
-                onClick={() => setRoleModalOpen(false)}
-                className="p-1 text-[#6c857d]"
-              >
-                <X size={18} />
-              </button>
-            </div>
-            <p className="mt-3 text-xs text-[#527067] leading-relaxed">
-              Test how the screen appears to both the business Admin and the read-only Owner.
-            </p>
-            <div className="mt-4 space-y-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setRole('admin')
-                  setRoleModalOpen(false)
-                }}
-                className={`w-full flex items-center justify-between p-3.5 rounded-2xl border text-left font-bold text-xs transition ${
-                  isAdmin
-                    ? 'border-[#0c786d] bg-[#eef8f4] text-[#0c786d]'
-                    : 'border-[#dde6e1] text-[#2c4e45]'
-                }`}
-              >
-                <div>
-                  <span className="block text-[13px]">Admin Console</span>
-                  <span className="block text-[10px] font-normal text-[#6b857d]">
-                    Full edit controls, Tally import, layout &amp; visibility toggles
-                  </span>
-                </div>
-                {isAdmin && <span className="h-2 w-2 rounded-full bg-[#0c786d]" />}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setRole('owner')
-                  setRoleModalOpen(false)
-                }}
-                className={`w-full flex items-center justify-between p-3.5 rounded-2xl border text-left font-bold text-xs transition ${
-                  isOwner
-                    ? 'border-[#0c786d] bg-[#eef8f4] text-[#0c786d]'
-                    : 'border-[#dde6e1] text-[#2c4e45]'
-                }`}
-              >
-                <div>
-                  <span className="block text-[13px]">Owner Dashboard</span>
-                  <span className="block text-[10px] font-normal text-[#6b857d]">
-                    Clean executive view with WhatsApp reminders &amp; call actions
-                  </span>
-                </div>
-                {isOwner && <span className="h-2 w-2 rounded-full bg-[#0c786d]" />}
-              </button>
-            </div>
-            <button
-              type="button"
-              onClick={() => {
-                setRoleModalOpen(false)
-                signOut()
-              }}
-              className="mt-4 w-full py-2.5 rounded-xl border border-[#ebd7d4] text-xs font-bold text-[#ba3a2b] hover:bg-[#fff5f4]"
-            >
-              Sign out
-            </button>
-          </div>
-        </div>
-      )}
     </>
   )
 }

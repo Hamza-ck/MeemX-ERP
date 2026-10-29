@@ -1,4 +1,4 @@
-import { X, Printer, MessageCircle, ShieldCheck, Download } from 'lucide-react'
+import { X, Printer, MessageCircle, ShieldCheck } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 
 export default function InvoicePrintModal({ isOpen, onClose, invoice }) {

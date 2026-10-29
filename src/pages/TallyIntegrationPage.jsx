@@ -2,19 +2,13 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Upload,
-  FileSpreadsheet,
   FileCode,
   CheckCircle2,
-  AlertTriangle,
-  ChevronLeft,
   Download,
-  AlertCircle,
-  FileText,
   X,
   Sparkles,
   RefreshCw,
 } from 'lucide-react'
-import { useAuth } from '../context/AuthContext'
 import { accDb } from '../lib/accountingDb'
 import {
   parseTallyXml,
@@ -22,10 +16,10 @@ import {
   importTallyDataToDb,
   SAMPLE_TALLY_XML,
 } from '../lib/tallyParser'
+import { syncFromSupabase } from '../lib/syncService'
 import Nav from '../components/Nav'
 
 export default function TallyIntegrationPage() {
-  const { isAdmin } = useAuth()
   const navigate = useNavigate()
   const fileInputRef = useRef(null)
 
@@ -36,6 +30,7 @@ export default function TallyIntegrationPage() {
   const [importing, setImporting] = useState(false)
   const [importSuccess, setImportSuccess] = useState(null)
   const [recentImports, setRecentImports] = useState([])
+  const [cloudSyncing, setCloudSyncing] = useState(false)
 
   // Problem items matching PDF Page 12 (empty by default; populated on simulated test or real parse issues)
   const [problems, setProblems] = useState([])
@@ -217,6 +212,34 @@ export default function TallyIntegrationPage() {
     setProblems(problems.map((p) => (p.id === id ? { ...p, resolved: true } : p)))
   }
 
+  const handleCloudSync = async () => {
+    setCloudSyncing(true)
+    try {
+      const res = await syncFromSupabase()
+      if (res.success) {
+        setImportSuccess(
+          `Synced from Cloud: ${res.counts.vouchers} vouchers, ${res.counts.parties} parties, and ${res.counts.ledgers} ledgers loaded into local database!`
+        )
+        const logEntry = {
+          filename: 'Supabase Cloud Sync',
+          date: 'Today, ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          added_count: res.counts.vouchers + res.counts.parties,
+          skipped_count: 0,
+          status: `${res.counts.vouchers} vouchers live`,
+          problems_count: 0,
+        }
+        await accDb.imports.add(logEntry)
+        await loadRecentImports()
+      } else {
+        alert('Cloud sync notice: ' + (res.error || 'Failed to sync'))
+      }
+    } catch (e) {
+      alert('Cloud sync error: ' + e.message)
+    } finally {
+      setCloudSyncing(false)
+    }
+  }
+
   const handleDownloadErrorReport = () => {
     const rows = [
       ['Tally Import Error Report'],
@@ -263,6 +286,18 @@ export default function TallyIntegrationPage() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {/* Supabase Cloud Sync Button */}
+            <button
+              type="button"
+              onClick={handleCloudSync}
+              disabled={cloudSyncing}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-[#0e655d] bg-[#0e655d] px-3.5 py-1.5 text-xs font-bold text-white hover:bg-[#0b534d] transition shadow-xs disabled:opacity-50"
+              title="Pull latest live vouchers and masters from Supabase Cloud"
+            >
+              <RefreshCw size={14} className={cloudSyncing ? 'animate-spin' : ''} />
+              <span>{cloudSyncing ? 'Syncing...' : 'Sync from Supabase'}</span>
+            </button>
+
             {/* Quick Demo Button */}
             <button
               type="button"

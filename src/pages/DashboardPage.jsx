@@ -7,25 +7,17 @@ import {
   ArrowUpRight,
   Check,
   Sliders,
+  MessageCircle,
 } from 'lucide-react'
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ResponsiveContainer,
-  Cell,
-} from 'recharts'
 import { useAuth } from '../context/AuthContext'
 import { accDb } from '../lib/accountingDb'
+import { calculateDashboardMetrics } from '../lib/dashboardMetrics'
+import SalesBarChart from '../components/SalesBarChart'
 import Nav from '../components/Nav'
 
 export default function DashboardPage() {
   const {
     isAdmin,
-    isOwner,
-    setRole,
     shopName,
     ownerPermissions,
     updateOwnerPermission,
@@ -33,7 +25,7 @@ export default function DashboardPage() {
     updateCardOrder,
   } = useAuth()
 
-  const [period, setPeriod] = useState('Today') // 'Today' | 'Week' | 'Month'
+  const [period, setPeriod] = useState('Month') // 'Today' | 'Week' | 'Month'
   const [editLayout, setEditLayout] = useState(false)
   const [downloadSuccess, setDownloadSuccess] = useState(false)
   const [remindSent, setRemindSent] = useState(null)
@@ -72,10 +64,12 @@ export default function DashboardPage() {
 
         const debtorsSum = debtors.reduce((s, d) => s + (Number(d.current_balance) || 0), 0)
         const creditorsSum = creditors.reduce((s, c) => s + (Number(c.current_balance) || 0), 0)
-        const stockSum = materials.reduce(
-          (s, m) => s + (Number(m.current_qty) || 0) * (Number(m.sales_rate) || 0),
-          0
-        )
+        const stockSum = materials.reduce((sum, material) => {
+          if (material.current_value != null && Number.isFinite(Number(material.current_value))) {
+            return sum + Number(material.current_value)
+          }
+          return sum + (Number(material.current_qty) || 0) * (Number(material.purchase_rate) || 0)
+        }, 0)
 
         const loansOwed = ledgers
           .filter((l) => (l.group || '').toLowerCase().includes('loans (liability)'))
@@ -84,66 +78,17 @@ export default function DashboardPage() {
           .filter((l) => (l.group || '').toLowerCase().includes('loans & advances (asset)'))
           .reduce((s, l) => s + (Number(l.current_balance) || 0), 0)
 
-        // Sales and expenses calculation from real vouchers & ledgers
-        const salesVouchers = vouchers.filter((v) => v.voucher_type === 'sales')
-        const todayStr = new Date().toISOString().slice(0, 10)
-        const now = new Date()
-        const weekAgo = new Date(now.getTime() - 7 * 86400000).toISOString().slice(0, 10)
-        const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10)
+        // Keep dashboard date totals in one pass through voucher history.
+        const calculated = calculateDashboardMetrics(vouchers, ledgers)
+        const {
+          salesToday, salesWeek, salesMonth,
+          expensesToday, expensesWeek, expensesMonth,
+          operatingResultToday, operatingResultWeek, operatingResultMonth,
+          sales7Days, sales7DaysTotal,
+          operatingResultBasis,
+        } = calculated
 
-        const salesToday = salesVouchers
-          .filter((v) => (v.date || '').slice(0, 10) === todayStr)
-          .reduce((s, v) => s + (Number(v.amount) || 0), 0)
-
-        const salesWeek = salesVouchers
-          .filter((v) => (v.date || '').slice(0, 10) >= weekAgo)
-          .reduce((s, v) => s + (Number(v.amount) || 0), 0)
-
-        const salesMonth = salesVouchers
-          .filter((v) => (v.date || '').slice(0, 10) >= monthStart)
-          .reduce((s, v) => s + (Number(v.amount) || 0), 0)
-
-        // Expenses from ledgers & expense payment vouchers
-        const expenseLedgerSum = ledgers
-          .filter((l) => (l.category || '').toLowerCase() === 'expense' || (l.group || '').toLowerCase().includes('expense'))
-          .reduce((s, l) => s + (Number(l.current_balance) || 0), 0)
-
-        const paymentVouchersSum = vouchers
-          .filter((v) => v.voucher_type === 'payment')
-          .reduce((s, v) => s + (Number(v.amount) || 0), 0)
-
-        const totalExpenses = Math.max(expenseLedgerSum, paymentVouchersSum)
-
-        // 7-day sales breakdown
-        const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-        const last7 = []
-        let last7Sum = 0
-        let maxDaySale = 0
-
-        for (let i = 6; i >= 0; i--) {
-          const d = new Date(now.getTime() - i * 86400000)
-          const dStr = d.toISOString().slice(0, 10)
-          const dayName = dayNames[d.getDay()]
-          const dayTotal = salesVouchers
-            .filter((v) => (v.date || '').slice(0, 10) === dStr)
-            .reduce((s, v) => s + (Number(v.amount) || 0), 0)
-
-          if (dayTotal > maxDaySale) maxDaySale = dayTotal
-          last7Sum += dayTotal
-          last7.push({
-            day: dayName,
-            date: dStr,
-            amount: dayTotal,
-            display: formatMoney(dayTotal),
-            isPeak: false,
-          })
-        }
-
-        if (maxDaySale > 0) {
-          last7.forEach((item) => {
-            if (item.amount === maxDaySale) item.isPeak = true
-          })
-        }
+        const last7 = sales7Days.map((item) => ({ ...item, display: formatMoney(item.amount) }))
 
         setLiveMetrics({
           debtorsSum,
@@ -155,14 +100,15 @@ export default function DashboardPage() {
           salesToday,
           salesWeek,
           salesMonth,
-          expensesToday: Math.round(totalExpenses / 30),
-          expensesWeek: Math.round(totalExpenses / 4),
-          expensesMonth: totalExpenses,
-          profitToday: Math.max(0, salesToday - Math.round(totalExpenses / 30)),
-          profitWeek: Math.max(0, salesWeek - Math.round(totalExpenses / 4)),
-          profitMonth: Math.max(0, salesMonth - totalExpenses),
+          expensesToday,
+          expensesWeek,
+          expensesMonth,
+          operatingResultToday,
+          operatingResultWeek,
+          operatingResultMonth,
+          operatingResultBasis,
           sales7Days: last7,
-          sales7DaysTotal: last7Sum,
+          sales7DaysTotal,
         })
 
         const topDebtors = debtors
@@ -211,11 +157,11 @@ export default function DashboardPage() {
 
     if (period === 'Today') {
       const sVal = liveMetrics?.salesToday || 0
-      const pVal = liveMetrics?.profitToday || 0
+      const pVal = liveMetrics?.operatingResultToday
       const eVal = liveMetrics?.expensesToday || 0
       return {
         sales: { value: formatMoney(sVal), diff: sVal > 0 ? 'Today revenue' : 'No sales today', isPositive: true },
-        profit: { value: formatMoney(pVal), diff: pVal > 0 ? 'Net profit' : 'No profit yet', isPositive: true },
+        profit: { value: pVal == null ? '—' : formatMoney(pVal), diff: pVal == null ? 'Profit details incomplete' : liveMetrics?.operatingResultBasis?.today || 'Sales less item costs & expenses', isPositive: pVal != null && pVal >= 0 },
         expenses: { value: formatMoney(eVal), diff: eVal > 0 ? 'Today expenses' : 'No expenses', isPositive: false },
         debtors: { value: debtorsVal, detail: debtorsDetail },
         creditors: { value: creditorsVal, detail: creditorsDetail },
@@ -224,11 +170,11 @@ export default function DashboardPage() {
       }
     } else if (period === 'Week') {
       const sVal = liveMetrics?.salesWeek || 0
-      const pVal = liveMetrics?.profitWeek || 0
+      const pVal = liveMetrics?.operatingResultWeek
       const eVal = liveMetrics?.expensesWeek || 0
       return {
         sales: { value: formatMoney(sVal), diff: sVal > 0 ? 'Last 7 days' : 'No sales this week', isPositive: true },
-        profit: { value: formatMoney(pVal), diff: pVal > 0 ? 'Net profit' : 'No profit', isPositive: true },
+        profit: { value: pVal == null ? '—' : formatMoney(pVal), diff: pVal == null ? 'Profit details incomplete' : liveMetrics?.operatingResultBasis?.week || 'Sales less item costs & expenses', isPositive: pVal != null && pVal >= 0 },
         expenses: { value: formatMoney(eVal), diff: eVal > 0 ? 'Weekly expenses' : 'No expenses', isPositive: false },
         debtors: { value: debtorsVal, detail: debtorsDetail },
         creditors: { value: creditorsVal, detail: creditorsDetail },
@@ -237,11 +183,11 @@ export default function DashboardPage() {
       }
     } else {
       const sVal = liveMetrics?.salesMonth || 0
-      const pVal = liveMetrics?.profitMonth || 0
+      const pVal = liveMetrics?.operatingResultMonth
       const eVal = liveMetrics?.expensesMonth || 0
       return {
         sales: { value: formatMoney(sVal), diff: sVal > 0 ? 'This month' : 'No sales this month', isPositive: true },
-        profit: { value: formatMoney(pVal), diff: pVal > 0 ? 'Net profit' : 'No profit', isPositive: true },
+        profit: { value: pVal == null ? '—' : formatMoney(pVal), diff: pVal == null ? 'Profit details incomplete' : liveMetrics?.operatingResultBasis?.month || 'Sales less item costs & expenses', isPositive: pVal != null && pVal >= 0 },
         expenses: { value: formatMoney(eVal), diff: eVal > 0 ? 'Monthly expenses' : 'No expenses', isPositive: false },
         debtors: { value: debtorsVal, detail: debtorsDetail },
         creditors: { value: creditorsVal, detail: creditorsDetail },
@@ -283,7 +229,7 @@ export default function DashboardPage() {
       [],
       ['Metric', 'Figure'],
       ['Sales', metrics.sales.value],
-      ['Gross & Net Profit', metrics.profit.value],
+      ['Operating result (sales less item costs & recorded expenses)', metrics.profit.value],
       ['Expenses', metrics.expenses.value],
       ['Debtors (They owe you)', metrics.debtors.value],
       ['Creditors (You owe)', metrics.creditors.value],
@@ -311,7 +257,7 @@ export default function DashboardPage() {
   const cardDefinitions = {
     sales: {
       id: 'sales',
-      label: 'Sales today',
+      label: period === 'Today' ? 'Sales today' : period === 'Week' ? 'Sales this week' : 'Sales this month',
       to: '/sales',
       value: metrics.sales.value,
       badge: metrics.sales.diff,
@@ -319,7 +265,7 @@ export default function DashboardPage() {
     },
     profit: {
       id: 'profit',
-      label: 'Profit',
+      label: 'Operating result',
       to: '/sales',
       value: metrics.profit.value,
       badge: metrics.profit.diff,
@@ -413,14 +359,12 @@ export default function DashboardPage() {
                 {editLayout ? 'Done' : 'Admin'}
               </button>
             )}
-            <button
-              type="button"
-              onClick={() => setRole(isAdmin ? 'owner' : 'admin')}
-              className="grid h-10 w-10 place-items-center rounded-full bg-[#0d6e63] text-white text-base font-extrabold shadow-sm active:scale-95 transition"
-              title="Tap to toggle between Admin and Owner view"
+            <div
+              className="grid h-10 w-10 place-items-center rounded-full bg-[#0d6e63] text-base font-extrabold text-white shadow-sm"
+              aria-label={isAdmin ? 'Admin account' : 'Owner account'}
             >
               {isAdmin ? 'A' : 'S'}
-            </button>
+            </div>
           </div>
         </header>
 
@@ -438,30 +382,9 @@ export default function DashboardPage() {
           </div>
 
           <div className="flex items-center gap-3">
-            {/* View Mode Toggle Buttons (PDF Page 13) */}
-            <div className="flex items-center rounded-2xl bg-white p-1 border border-[#e1e9e3] shadow-xs">
-              <button
-                type="button"
-                onClick={() => setRole('admin')}
-                className={`rounded-xl px-3.5 py-1.5 text-xs font-bold transition ${
-                  isAdmin ? 'bg-[#0e655d] text-white shadow-xs' : 'text-[#5d776f] hover:text-[#0e655d]'
-                }`}
-              >
-                Admin view
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setRole('owner')
-                  setEditLayout(false)
-                }}
-                className={`rounded-xl px-3.5 py-1.5 text-xs font-bold transition ${
-                  isOwner ? 'bg-[#0e655d] text-white shadow-xs' : 'text-[#5d776f] hover:text-[#0e655d]'
-                }`}
-              >
-                Owner view
-              </button>
-            </div>
+            <span className="rounded-xl border border-[#e1e9e3] bg-white px-3 py-2 text-xs font-bold text-[#5d776f]">
+              {isAdmin ? 'Admin account' : 'Owner view'}
+            </span>
 
             {/* Time Filter Pills: Today / Week / Month */}
             <div className="flex items-center rounded-2xl bg-white p-1 border border-[#e1e9e3] shadow-xs">
@@ -712,7 +635,7 @@ export default function DashboardPage() {
                 <h3 className="text-sm font-extrabold text-[#143d35]">
                   Sales, last 7 days
                 </h3>
-                <span className="text-xs text-[#718b82]">Daily revenue trend</span>
+      <span className="text-xs text-[#718b82]">Daily revenue trend</span>
               </div>
               <strong className="text-base font-extrabold text-[#0e655d]">
                 {formatMoney(sales7DaysTotal)}
@@ -720,44 +643,7 @@ export default function DashboardPage() {
             </div>
 
             <div className="h-52 w-full pt-2">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={sales7Days} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                  <XAxis
-                    dataKey="day"
-                    stroke="#8da39b"
-                    fontSize={11}
-                    tickLine={false}
-                    axisLine={false}
-                  />
-                  <YAxis
-                    stroke="#8da39b"
-                    fontSize={10}
-                    tickLine={false}
-                    axisLine={false}
-                    tickFormatter={(v) => `₹${v / 100000}L`}
-                  />
-                  <Tooltip
-                    cursor={{ fill: '#f0f6f3' }}
-                    formatter={(val) => [`₹${(val / 100000).toFixed(1)}L`, 'Revenue']}
-                    contentStyle={{
-                      backgroundColor: '#0e655d',
-                      borderRadius: '12px',
-                      color: '#ffffff',
-                      border: 'none',
-                      fontSize: '12px',
-                      fontWeight: 'bold',
-                    }}
-                  />
-                  <Bar dataKey="amount" radius={[8, 8, 0, 0]}>
-                    {sales7Days.map((entry, index) => (
-                      <Cell
-                        key={`cell-${index}`}
-                        fill={entry.isPeak ? '#0e655d' : '#8cc0b3'}
-                      />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
+              <SalesBarChart data={sales7Days} formatMoney={formatMoney} />
             </div>
           </div>
 

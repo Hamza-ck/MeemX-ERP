@@ -30,3 +30,9 @@ dist-ssr
 .vercel
 .env*
 .aistudio
+
+# Tally Connector
+connector/.env
+connector/.state.json
+connector/samples/
+supabase/.temp/

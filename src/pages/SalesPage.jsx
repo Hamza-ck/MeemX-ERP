@@ -8,19 +8,12 @@ import {
   Edit3,
   FileSpreadsheet,
 } from 'lucide-react'
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ResponsiveContainer,
-  Cell,
-} from 'recharts'
 import Nav from '../components/Nav'
 import InvoicePrintModal from '../components/InvoicePrintModal'
 import AdminEditModal from '../components/AdminEditModal'
+import SalesBarChart from '../components/SalesBarChart'
 import { accDb } from '../lib/accountingDb'
+import { calculateSalesMetrics } from '../lib/dashboardMetrics'
 
 export default function SalesPage() {
   const navigate = useNavigate()
@@ -41,36 +34,9 @@ export default function SalesPage() {
     }
   }
 
-  // 7-day Sales Bar Chart data computed from live invoices
-  const sales7Days = useMemo(() => {
-    const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-    const now = new Date()
-    const list = []
-    let max = 0
-
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date(now.getTime() - i * 86400000)
-      const dStr = d.toISOString().slice(0, 10)
-      const dayTotal = invoices
-        .filter((inv) => (inv.date || '').slice(0, 10) === dStr)
-        .reduce((sum, inv) => sum + (Number(inv.amount) || 0), 0)
-
-      if (dayTotal > max) max = dayTotal
-      list.push({
-        day: dayNames[d.getDay()],
-        amount: dayTotal,
-        display: dayTotal >= 100000 ? `₹${(dayTotal / 100000).toFixed(1)}L` : dayTotal >= 1000 ? `₹${(dayTotal / 1000).toFixed(0)}K` : `₹${dayTotal}`,
-        isPeak: false,
-      })
-    }
-
-    if (max > 0) {
-      list.forEach((item) => {
-        if (item.amount === max) item.isPeak = true
-      })
-    }
-    return list
-  }, [invoices])
+  // Derive the 7-day summary from the same local-calendar metric helper as the dashboard.
+  const { sales7Days, sales7DaysTotal } = useMemo(() => calculateSalesMetrics(invoices), [invoices])
+  const formatChartMoney = (amount) => `₹${Number(amount || 0).toLocaleString('en-IN')}`
 
   // Load live invoices from Dexie DB
   const loadInvoices = useCallback(async () => {
@@ -165,54 +131,17 @@ export default function SalesPage() {
             <div>
               <span className="text-xs font-bold text-[#6a847c]">Last 7 days</span>
               <strong className="mt-1 block text-[34px] font-extrabold tracking-tight text-[#11382f]">
-                ₹9.8L
+                {formatChartMoney(sales7DaysTotal)}
               </strong>
             </div>
-            <span className="inline-flex items-center gap-1 rounded-full bg-[#e2f3ec] px-3 py-1 text-xs font-bold text-[#0d786d]">
-              ▲ 12%
+            <span className="inline-flex items-center rounded-full bg-[#e2f3ec] px-3 py-1 text-xs font-bold text-[#0d786d]">
+              Actual sales
             </span>
           </div>
 
           {/* Interactive Bar Chart */}
           <div className="mt-5 h-44 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={sales7Days} margin={{ top: 10, right: 10, left: -25, bottom: 0 }}>
-                <XAxis
-                  dataKey="day"
-                  stroke="#7c968e"
-                  fontSize={11}
-                  tickLine={false}
-                  axisLine={false}
-                />
-                <YAxis
-                  stroke="#7c968e"
-                  fontSize={10}
-                  tickLine={false}
-                  axisLine={false}
-                  tickFormatter={(v) => `₹${v / 100000}L`}
-                />
-                <Tooltip
-                  cursor={{ fill: '#f0f6f3' }}
-                  formatter={(val) => [`₹${(val / 100000).toFixed(1)}L`, 'Sales']}
-                  contentStyle={{
-                    backgroundColor: '#0e655d',
-                    borderRadius: '12px',
-                    color: '#ffffff',
-                    border: 'none',
-                    fontSize: '12px',
-                    fontWeight: 'bold',
-                  }}
-                />
-                <Bar dataKey="amount" radius={[8, 8, 0, 0]}>
-                  {sales7Days.map((entry, index) => (
-                    <Cell
-                      key={`cell-${index}`}
-                      fill={entry.isPeak ? '#0e655d' : '#8dc1b4'}
-                    />
-                  ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
+            <SalesBarChart data={sales7Days} formatMoney={formatChartMoney} barColor="#8dc1b4" />
           </div>
         </section>
 

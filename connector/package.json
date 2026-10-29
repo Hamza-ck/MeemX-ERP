@@ -1,0 +1,13 @@
+{
+  "name": "meemx-tally-connector",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only Tally Prime connector — pulls data from Tally HTTP interface and pushes to MeemX via the tally-import edge function.",
+  "scripts": {
+    "discover": "node sync.mjs discover",
+    "pull": "node sync.mjs pull",
+    "incremental": "node sync.mjs incremental",
+    "test": "node --test ../tests/test_connector.mjs"
+  }
+}

@@ -22,9 +22,51 @@ accDb.version(2).stores({
   imports: '++id, filename, date, added_count, skipped_count, status, problems_count',
 })
 
+accDb.version(3).stores({
+  vouchers: '++id, voucher_no, voucher_type, date, party_id, party_name, party_uid, amount, due_amount, createdAt',
+  materials: '++id, sku, name, category, unit, current_qty, purchase_rate, sales_rate, reorder_threshold',
+  parties: '++id, name, type, uid, phone, current_balance, age_bucket, next_payment, due_days',
+  ledgers: '++id, name, group, current_balance, category',
+  settings: 'key, value',
+  imports: '++id, filename, date, added_count, skipped_count, status, problems_count',
+})
+
+let applyingRemoteSnapshot = false
+export function setApplyingRemoteSnapshot(value) {
+  applyingRemoteSnapshot = value
+}
+
+function notifyLocalDataChanged() {
+  if (!applyingRemoteSnapshot && typeof window !== 'undefined') {
+    window.dispatchEvent(new Event('accounting-local-data-changed'))
+  }
+}
+
+for (const tableName of ['vouchers', 'materials', 'parties', 'ledgers']) {
+  const table = accDb.table(tableName)
+  table.hook('creating', (_key, record) => {
+    if (!applyingRemoteSnapshot) {
+      record.local_dirty = true
+      record.local_revision = (Number(record.local_revision) || 0) + 1
+      notifyLocalDataChanged()
+    }
+  })
+  table.hook('updating', (changes, _key, original) => {
+    if (applyingRemoteSnapshot) return changes
+    notifyLocalDataChanged()
+    return {
+      ...changes,
+      local_dirty: true,
+      local_revision: (Number(original?.local_revision) || 0) + 1,
+      updatedAt: new Date().toISOString(),
+    }
+  })
+  table.hook('deleting', () => notifyLocalDataChanged())
+}
+
 // Generate Next Debtor Permanent UID: UID-CUST-1001, UID-CUST-1002, etc.
-export async function generateNextDebtorUid() {
-  const existingParties = await accDb.parties.toArray()
+export async function generateNextDebtorUid(database = accDb) {
+  const existingParties = await database.parties.toArray()
   const uidNums = existingParties
     .map((p) => {
       if (!p.uid) return 0
@@ -42,7 +84,7 @@ export async function generateNextDebtorUid() {
  * Resolve or Assign Customer Permanent UID:
  * Every invoice with a closing due balance gets UID permanently circulated.
  */
-export async function resolvePartyUidOnSale(partyName, dueAmount, phone = '') {
+export async function resolvePartyUidOnSale(partyName, dueAmount, phone = '', database = accDb) {
   if (!partyName || !partyName.trim()) {
     return { party: null, uid: null }
   }
@@ -50,7 +92,7 @@ export async function resolvePartyUidOnSale(partyName, dueAmount, phone = '') {
   const cleanName = partyName.trim()
   const isCash = cleanName.toLowerCase() === 'cash' || cleanName.toLowerCase() === 'counter cash'
 
-  const allParties = await accDb.parties.toArray()
+  const allParties = await database.parties.toArray()
   let party = allParties.find(
     (p) => p.name.trim().toLowerCase() === cleanName.toLowerCase() && p.type === 'debtor'
   )
@@ -62,8 +104,8 @@ export async function resolvePartyUidOnSale(partyName, dueAmount, phone = '') {
       return { party, uid: party.uid }
     }
     if (hasDue) {
-      const newUid = await generateNextDebtorUid()
-      await accDb.parties.update(party.id, { uid: newUid })
+      const newUid = await generateNextDebtorUid(database)
+      await database.parties.update(party.id, { uid: newUid })
       party.uid = newUid
       return { party, uid: newUid }
     }
@@ -76,10 +118,10 @@ export async function resolvePartyUidOnSale(partyName, dueAmount, phone = '') {
 
   let assignedUid = null
   if (hasDue) {
-    assignedUid = await generateNextDebtorUid()
+    assignedUid = await generateNextDebtorUid(database)
   }
 
-  const newPartyId = await accDb.parties.add({
+  const newPartyId = await database.parties.add({
     name: cleanName,
     type: 'debtor',
     uid: assignedUid,
@@ -92,32 +134,36 @@ export async function resolvePartyUidOnSale(partyName, dueAmount, phone = '') {
     created_at: new Date().toISOString(),
   })
 
-  const createdParty = await accDb.parties.get(newPartyId)
+  const createdParty = await database.parties.get(newPartyId)
   return { party: createdParty, uid: assignedUid }
 }
 
 /**
  * Apply Voucher Balance and Inventory Effects
  */
-async function applyVoucherEffects(voucher, isReversal = false) {
+async function applyVoucherEffects(voucher, isReversal = false, database = accDb) {
+  if (voucher.source_system === 'tally') return
+
   const multiplier = isReversal ? -1 : 1
   const amount = Number(voucher.amount) || 0
   const paidAmount = Number(voucher.paid_amount) || 0
   const dueAmount = Number(voucher.due_amount) || 0
 
   // 1. Inventory Movements
-  if (Array.isArray(voucher.items) && voucher.items.length > 0) {
+  if (voucher.source_system !== 'tally' && Array.isArray(voucher.items) && voucher.items.length > 0) {
     for (const item of voucher.items) {
       const itemQty = Number(item.qty) || 0
       if (!itemQty) continue
 
       let material = null
       if (item.material_id) {
-        material = await accDb.materials.get(item.material_id)
-      } else if (item.name) {
-        material = await accDb.materials.where('name').equalsIgnoreCase(item.name).first()
-      } else if (item.sku) {
-        material = await accDb.materials.where('sku').equalsIgnoreCase(item.sku).first()
+        material = await database.materials.get(item.material_id)
+      }
+      if (!material && item.sku) {
+        material = await database.materials.where('sku').equalsIgnoreCase(item.sku).first()
+      }
+      if (!material && item.name) {
+        material = await database.materials.where('name').equalsIgnoreCase(item.name).first()
       }
 
       if (material) {
@@ -129,7 +175,11 @@ async function applyVoucherEffects(voucher, isReversal = false) {
         }
 
         const newQty = Math.max(0, (Number(material.current_qty) || 0) + qtyChange)
-        await accDb.materials.update(material.id, { current_qty: newQty })
+        const stockChanges = { current_qty: newQty }
+        if (material.current_value != null) {
+          stockChanges.current_value = newQty * (Number(material.purchase_rate) || 0)
+        }
+        await database.materials.update(material.id, stockChanges)
       }
     }
   }
@@ -138,9 +188,9 @@ async function applyVoucherEffects(voucher, isReversal = false) {
   if (voucher.party_name && voucher.party_name.trim().toLowerCase() !== 'cash') {
     let party = null
     if (voucher.party_id) {
-      party = await accDb.parties.get(voucher.party_id)
+      party = await database.parties.get(voucher.party_id)
     } else {
-      party = await accDb.parties.where('name').equalsIgnoreCase(voucher.party_name.trim()).first()
+      party = await database.parties.where('name').equalsIgnoreCase(voucher.party_name.trim()).first()
     }
 
     if (party) {
@@ -160,7 +210,7 @@ async function applyVoucherEffects(voucher, isReversal = false) {
       }
 
       const newBalance = Math.max(0, (Number(party.current_balance) || 0) + balanceChange)
-      await accDb.parties.update(party.id, { current_balance: newBalance })
+      await database.parties.update(party.id, { current_balance: newBalance })
     }
   }
 
@@ -169,7 +219,7 @@ async function applyVoucherEffects(voucher, isReversal = false) {
   const isBank = paymentMode.toLowerCase().includes('bank') || paymentMode.toLowerCase().includes('hdfc') || paymentMode.toLowerCase().includes('neft')
   const ledgerGroup = isBank ? 'Bank Accounts' : 'Cash-in-hand'
 
-  let targetLedger = await accDb.ledgers.where('group').equals(ledgerGroup).first()
+  let targetLedger = await database.ledgers.where('group').equals(ledgerGroup).first()
   if (targetLedger) {
     let cashChange = 0
     if (voucher.voucher_type === 'sales') {
@@ -185,97 +235,105 @@ async function applyVoucherEffects(voucher, isReversal = false) {
     }
 
     const newLedgerBalance = (Number(targetLedger.current_balance) || 0) + cashChange
-    await accDb.ledgers.update(targetLedger.id, { current_balance: newLedgerBalance })
+    await database.ledgers.update(targetLedger.id, { current_balance: newLedgerBalance })
   }
 }
 
 /**
- * Save / Create New Voucher
+ * Create a voucher mutation boundary that can be exercised against an isolated
+ * database in tests while the app uses the production Dexie instance.
  */
-export async function createVoucher(voucherData) {
-  return await accDb.transaction('rw', [accDb.vouchers, accDb.materials, accDb.parties, accDb.ledgers], async () => {
-    let assignedUid = voucherData.party_uid || null
-    if (voucherData.voucher_type === 'sales') {
-      const { uid } = await resolvePartyUidOnSale(
-        voucherData.party_name,
-        voucherData.due_amount,
-        voucherData.phone || ''
-      )
-      assignedUid = uid || assignedUid
-    }
+export function createVoucherMutationService({
+  database = accDb,
+  now = () => new Date(),
+  applyEffects = (voucher, isReversal) => applyVoucherEffects(voucher, isReversal, database),
+  resolvePartyUid = (name, due, phone) => resolvePartyUidOnSale(name, due, phone, database),
+} = {}) {
+  async function createVoucher(voucherData) {
+    return database.transaction('rw', [database.vouchers, database.materials, database.parties, database.ledgers], async () => {
+      let assignedUid = voucherData.party_uid || null
+      if (voucherData.voucher_type === 'sales') {
+        const { uid } = await resolvePartyUid(voucherData.party_name, voucherData.due_amount, voucherData.phone || '')
+        assignedUid = uid || assignedUid
+      }
 
-    const newVoucher = {
-      ...voucherData,
-      party_uid: assignedUid,
-      amount: Number(voucherData.amount) || 0,
-      paid_amount: Number(voucherData.paid_amount) || 0,
-      due_amount: Number(voucherData.due_amount) || 0,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    }
+      const timestamp = now().toISOString()
+      const newVoucher = {
+        ...voucherData,
+        party_uid: assignedUid,
+        amount: Number(voucherData.amount) || 0,
+        paid_amount: Number(voucherData.paid_amount) || 0,
+        due_amount: Number(voucherData.due_amount) || 0,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }
 
-    const voucherId = await accDb.vouchers.add(newVoucher)
-    newVoucher.id = voucherId
+      const voucherId = await database.vouchers.add(newVoucher)
+      newVoucher.id = voucherId
+      await applyEffects(newVoucher, false)
+      return newVoucher
+    })
+  }
 
-    await applyVoucherEffects(newVoucher, false)
-    return newVoucher
-  })
+  async function updateVoucher(voucherId, updatedData) {
+    return database.transaction('rw', [database.vouchers, database.materials, database.parties, database.ledgers], async () => {
+      const existing = await database.vouchers.get(voucherId)
+      if (!existing) throw new Error(`Voucher with ID ${voucherId} does not exist`)
+
+      await applyEffects(existing, true)
+
+      const nextData = { ...existing, ...updatedData }
+      let assignedUid = nextData.party_uid || null
+      if (nextData.voucher_type === 'sales') {
+        const { uid } = await resolvePartyUid(nextData.party_name, nextData.due_amount, nextData.phone || '')
+        assignedUid = uid || assignedUid
+      }
+
+      const merged = {
+        ...nextData,
+        party_uid: assignedUid,
+        amount: Number(nextData.amount) || 0,
+        paid_amount: Number(nextData.paid_amount) || 0,
+        due_amount: updatedData.amount !== undefined || updatedData.paid_amount !== undefined
+          ? Math.max(0, (Number(nextData.amount) || 0) - (Number(nextData.paid_amount) || 0))
+          : Number(nextData.due_amount) || 0,
+        updatedAt: now().toISOString(),
+      }
+      if (updatedData.amount !== undefined || updatedData.paid_amount !== undefined) {
+        merged.status = merged.due_amount <= 0 ? 'Paid' : 'Due'
+      }
+
+      await database.vouchers.put(merged)
+      await applyEffects(merged, false)
+      return merged
+    })
+  }
+
+  async function deleteVoucher(voucherId) {
+    return database.transaction('rw', [database.vouchers, database.materials, database.parties, database.ledgers, database.settings], async () => {
+      const existing = await database.vouchers.get(voucherId)
+      if (!existing) return
+      await applyEffects(existing, true)
+      if (existing.cloud_id) {
+        const setting = await database.settings.get('pending_cloud_deletes')
+        const pending = setting?.value ? JSON.parse(setting.value) : []
+        if (!pending.some((item) => item.table === 'vouchers' && item.cloud_id === existing.cloud_id)) {
+          pending.push({ table: 'vouchers', cloud_id: existing.cloud_id })
+        }
+        await database.settings.put({ key: 'pending_cloud_deletes', value: JSON.stringify(pending) })
+      }
+      await database.vouchers.delete(voucherId)
+    })
+  }
+
+  return { createVoucher, updateVoucher, deleteVoucher }
 }
 
-/**
- * Modify / Edit Voucher with Automatic Reversal & Reapplication
- */
-export async function updateVoucher(voucherId, updatedData) {
-  return await accDb.transaction('rw', [accDb.vouchers, accDb.materials, accDb.parties, accDb.ledgers], async () => {
-    const existing = await accDb.vouchers.get(voucherId)
-    if (!existing) {
-      throw new Error(`Voucher with ID ${voucherId} does not exist`)
-    }
+const voucherMutationService = createVoucherMutationService()
 
-    // Step 1: Reverse previous financial and inventory impacts
-    await applyVoucherEffects(existing, true)
-
-    // Step 2: Prepare new updated object
-    let assignedUid = updatedData.party_uid || existing.party_uid || null
-    if (updatedData.voucher_type === 'sales') {
-      const { uid } = await resolvePartyUidOnSale(
-        updatedData.party_name || existing.party_name,
-        updatedData.due_amount,
-        updatedData.phone || ''
-      )
-      assignedUid = uid || assignedUid
-    }
-
-    const merged = {
-      ...existing,
-      ...updatedData,
-      party_uid: assignedUid,
-      amount: Number(updatedData.amount) || 0,
-      paid_amount: Number(updatedData.paid_amount) || 0,
-      due_amount: Number(updatedData.due_amount) || 0,
-      updatedAt: new Date().toISOString(),
-    }
-
-    // Step 3: Write updated record
-    await accDb.vouchers.put(merged)
-
-    // Step 4: Apply new impacts
-    await applyVoucherEffects(merged, false)
-    return merged
-  })
-}
-
-/**
- * Delete Voucher with Reversal
- */
-export async function deleteVoucher(voucherId) {
-  return await accDb.transaction('rw', [accDb.vouchers, accDb.materials, accDb.parties, accDb.ledgers], async () => {
-    const existing = await accDb.vouchers.get(voucherId)
-    if (!existing) return
-    await applyVoucherEffects(existing, true)
-    await accDb.vouchers.delete(voucherId)
-  })
-}
+export const createVoucher = (voucherData) => voucherMutationService.createVoucher(voucherData)
+export const updateVoucher = (voucherId, updatedData) => voucherMutationService.updateVoucher(voucherId, updatedData)
+export const deleteVoucher = (voucherId) => voucherMutationService.deleteVoucher(voucherId)
 
 /**
  * -------------------------------------------------------------
@@ -463,12 +521,13 @@ export async function createStockItem({
   category = 'Cases & Covers',
   unit = 'pcs',
   purchase_rate = 0,
-  sales_rate = 0,
+  sales_rate = undefined,
   current_qty = 0,
+  current_value = null,
   reorder_threshold = 10,
 }) {
   const pRate = Number(purchase_rate) || 0
-  const sRate = Number(sales_rate) || Math.round(pRate * 1.3)
+  const sRate = sales_rate === undefined ? Math.round(pRate * 1.3) : Number(sales_rate) || 0
   const qty = Number(current_qty) || 0
   const threshold = Number(reorder_threshold) || 10
   const autoSku = sku?.trim() || `SKU-${name.replace(/[^A-Za-z0-9]/g, '').slice(0, 6).toUpperCase()}-${Math.floor(100 + Math.random() * 900)}`
@@ -481,6 +540,7 @@ export async function createStockItem({
     purchase_rate: pRate,
     sales_rate: sRate,
     current_qty: qty,
+    ...(current_value != null ? { current_value: Number(current_value) || 0 } : {}),
     reorder_threshold: threshold,
     status: qty <= 0 ? 'Out of stock' : qty <= threshold ? 'Low' : 'Healthy',
     created_at: new Date().toISOString(),
@@ -494,7 +554,11 @@ export async function updateStockQty(id, newQty) {
   if (!item) return
   const qty = Math.max(0, Number(newQty) || 0)
   const status = qty <= 0 ? 'Out of stock' : qty <= (item.reorder_threshold || 10) ? 'Low' : 'Healthy'
-  await accDb.materials.update(id, { current_qty: qty, status })
+  await accDb.materials.update(id, {
+    current_qty: qty,
+    status,
+    ...(item.current_value != null ? { current_value: qty * (Number(item.purchase_rate) || 0) } : {}),
+  })
   window.dispatchEvent(new Event('accounting-data-updated'))
 }
 
@@ -660,17 +724,7 @@ export async function updateVoucherRecord(id, updates) {
     cleanUpdates.status = cleanUpdates.due_amount <= 0 ? 'Paid' : 'Due'
   }
 
-  await accDb.vouchers.update(voucher.id, cleanUpdates)
-
-  // If party name or due amount changed for a sales invoice, recalibrate party balance
-  if (voucher.party_name) {
-    const party = await accDb.parties.where('name').equalsIgnoreCase(voucher.party_name.trim()).first()
-    if (party && party.type === 'debtor') {
-      const partyVouchers = await accDb.vouchers.where('party_name').equalsIgnoreCase(party.name).toArray()
-      const totalDue = partyVouchers.reduce((sum, v) => sum + (Number(v.due_amount) || 0), 0)
-      await accDb.parties.update(party.id, { current_balance: totalDue })
-    }
-  }
+  await updateVoucher(voucher.id, { ...voucher, ...cleanUpdates })
 
   window.dispatchEvent(new Event('accounting-data-updated'))
   return await accDb.vouchers.get(voucher.id)
@@ -692,7 +746,22 @@ export async function updateLedgerRecord(id, updates) {
 
 export async function deleteDbRecord(table, id) {
   if (!accDb[table]) throw new Error(`Table ${table} does not exist`)
+  if (table === 'vouchers') {
+    await deleteVoucher(Number(id))
+    window.dispatchEvent(new Event('accounting-data-updated'))
+    return
+  }
+  const record = await accDb[table].get(Number(id))
+  if (record?.cloud_id && ['vouchers', 'materials', 'parties', 'ledgers'].includes(table)) {
+    const setting = await accDb.settings.get('pending_cloud_deletes')
+    const pending = setting?.value ? JSON.parse(setting.value) : []
+    if (!pending.some((item) => item.table === table && item.cloud_id === record.cloud_id)) {
+      pending.push({ table, cloud_id: record.cloud_id })
+    }
+    await accDb.settings.put({ key: 'pending_cloud_deletes', value: JSON.stringify(pending) })
+  }
   await accDb[table].delete(Number(id))
+  notifyLocalDataChanged()
   window.dispatchEvent(new Event('accounting-data-updated'))
 }
 
@@ -700,14 +769,24 @@ export async function deleteDbRecord(table, id) {
  * Purge all sample accounting data (vouchers, inventory, parties, ledgers, imports)
  */
 export async function purgeSampleData() {
-  await Promise.all([
-    accDb.vouchers.clear(),
-    accDb.materials.clear(),
-    accDb.parties.clear(),
-    accDb.ledgers.clear(),
-    accDb.imports.clear(),
-  ])
-  await accDb.settings.put({ key: 'purged_sample_data', value: 'true' })
+  const cloudTables = ['vouchers', 'materials', 'parties', 'ledgers']
+  await accDb.transaction('rw', [accDb.vouchers, accDb.materials, accDb.parties, accDb.ledgers, accDb.imports, accDb.settings], async () => {
+    const setting = await accDb.settings.get('pending_cloud_deletes')
+    const pending = setting?.value ? JSON.parse(setting.value) : []
+    for (const tableName of cloudTables) {
+      const records = await accDb.table(tableName).toArray()
+      for (const record of records) {
+        if (record.cloud_id && !pending.some((item) => item.table === tableName && item.cloud_id === record.cloud_id)) {
+          pending.push({ table: tableName, cloud_id: record.cloud_id })
+        }
+      }
+      await accDb.table(tableName).clear()
+    }
+    await accDb.imports.clear()
+    await accDb.settings.put({ key: 'pending_cloud_deletes', value: JSON.stringify(pending) })
+    await accDb.settings.put({ key: 'purged_sample_data', value: 'true' })
+  })
+  notifyLocalDataChanged()
   window.dispatchEvent(new Event('accounting-data-updated'))
 }
 
@@ -725,8 +804,6 @@ export async function initDefaultAccountingData() {
       { key: 'whatsapp_language', value: 'English / বাংলা' },
       { key: 'auto_import_reminder', value: 'true' },
       { key: 'last_backup_time', value: 'today, 6:45 PM' },
-      { key: 'owner_pin', value: '1234' },
-      { key: 'admin_pin', value: '8888' },
       {
         key: 'owner_permissions',
         value: JSON.stringify({

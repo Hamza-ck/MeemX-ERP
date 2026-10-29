@@ -34,4 +34,30 @@ export default defineConfig({
     port: 3000,
     allowedHosts: true,
   },
+  build: {
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          minSize: 20_000,
+          groups: [
+            {
+              name: 'react-vendor',
+              test: /node_modules[\\/](react|react-dom|scheduler|react-router|react-router-dom|@remix-run[\\/]router)[\\/]/,
+              priority: 20,
+            },
+            {
+              name: 'supabase-vendor',
+              test: /node_modules[\\/]@supabase[\\/]/,
+              priority: 10,
+            },
+            {
+              name: 'dexie-vendor',
+              test: /node_modules[\\/]dexie[\\/]/,
+              priority: 10,
+            },
+          ],
+        },
+      },
+    },
+  },
 })

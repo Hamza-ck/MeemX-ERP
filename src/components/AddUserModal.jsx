@@ -1,8 +1,6 @@
 import { useState, useEffect } from 'react'
 import {
   UserPlus,
-  UserCheck,
-  Shield,
   X,
   User,
   Phone,
@@ -36,7 +34,7 @@ export default function AddUserModal({
       setName(editingUser.name || '')
       setPhone(editingUser.phone || '')
       setRole(editingUser.role === 'admin' ? 'admin' : 'owner')
-      setPin(editingUser.pin || '1234')
+      setPin(editingUser.pin || '')
     } else {
       setName('')
       setPhone('+91 ')
@@ -81,6 +79,10 @@ export default function AddUserModal({
 
     if (cleanPin.length !== 4) {
       setError('Please enter a valid 4-digit numeric PIN.')
+      return
+    }
+    if (cleanPin === '1234' || cleanPin === '8888') {
+      setError('Choose a PIN other than 1234 or 8888.')
       return
     }
 
@@ -136,12 +138,12 @@ export default function AddUserModal({
             </div>
             <div>
               <h3 className="text-[17px] font-extrabold tracking-tight text-[#11382f]">
-                {editingUser ? 'Edit User Access' : 'Add User & Access'}
+                {editingUser ? 'Edit Local PIN' : 'Add Local PIN'}
               </h3>
               <p className="text-xs text-[#6b867e]">
                 {editingUser
-                  ? 'Update role permissions or 4-digit unlock PIN'
-                  : 'Grant Owner or Admin access with a 4-digit PIN'}
+                  ? 'Update the local 4-digit unlock PIN'
+                  : 'Add a local PIN for this device'}
               </p>
             </div>
           </div>
@@ -193,69 +195,15 @@ export default function AddUserModal({
             </div>
           </div>
 
-          {/* Access Role Cards */}
-          <div>
-            <label className="block text-xs font-bold text-[#143d35] mb-1.5">
-              Access role <span className="text-[#c25e19]">*</span>
-            </label>
-            <div className="grid grid-cols-2 gap-2.5">
-              <button
-                type="button"
-                onClick={() => setRole('owner')}
-                className={`flex flex-col items-start rounded-2xl border p-3.5 text-left transition ${
-                  role === 'owner'
-                    ? 'border-[#0e655d] bg-[#eef7f3] ring-2 ring-[#0e655d]/15'
-                    : 'border-[#d8e3de] bg-[#fafcfb] hover:bg-[#f2f7f4]'
-                }`}
-              >
-                <div className="flex w-full items-center justify-between mb-1">
-                  <span className="inline-flex items-center gap-1.5 text-xs font-extrabold text-[#11382f]">
-                    <UserCheck size={15} className="text-[#0e655d]" />
-                    Owner
-                  </span>
-                  <span
-                    className={`h-2.5 w-2.5 rounded-full ${
-                      role === 'owner' ? 'bg-[#0e655d]' : 'bg-[#d0ded8]'
-                    }`}
-                  />
-                </div>
-                <span className="text-[11px] font-medium text-[#5e7d73]">
-                  View only · sees permitted cards &amp; reports
-                </span>
-              </button>
+          <p className="rounded-xl bg-[#f3f8f5] p-3 text-[11px] leading-relaxed text-[#5e7d73]">
+            This PIN only unlocks the current device after account sign-in. Account roles come from your profile.
+          </p>
 
-              <button
-                type="button"
-                onClick={() => setRole('admin')}
-                className={`flex flex-col items-start rounded-2xl border p-3.5 text-left transition ${
-                  role === 'admin'
-                    ? 'border-[#0e655d] bg-[#eef7f3] ring-2 ring-[#0e655d]/15'
-                    : 'border-[#d8e3de] bg-[#fafcfb] hover:bg-[#f2f7f4]'
-                }`}
-              >
-                <div className="flex w-full items-center justify-between mb-1">
-                  <span className="inline-flex items-center gap-1.5 text-xs font-extrabold text-[#11382f]">
-                    <Shield size={15} className="text-[#0e655d]" />
-                    Admin
-                  </span>
-                  <span
-                    className={`h-2.5 w-2.5 rounded-full ${
-                      role === 'admin' ? 'bg-[#0e655d]' : 'bg-[#d0ded8]'
-                    }`}
-                  />
-                </div>
-                <span className="text-[11px] font-medium text-[#5e7d73]">
-                  Full control · Tally import &amp; settings
-                </span>
-              </button>
-            </div>
-          </div>
-
-          {/* 4-Digit Access PIN */}
+          {/* 4-Digit Device PIN */}
           <div>
             <div className="flex items-center justify-between mb-1.5">
               <label className="block text-xs font-bold text-[#143d35]">
-                4-Digit login PIN <span className="text-[#c25e19]">*</span>
+                4-Digit device PIN <span className="text-[#c25e19]">*</span>
               </label>
               <button
                 type="button"
@@ -273,7 +221,7 @@ export default function AddUserModal({
                 maxLength={4}
                 pattern="[0-9]*"
                 required
-                placeholder="1234"
+                placeholder="Enter 4 digits"
                 value={pin}
                 onChange={(e) => {
                   setError('')

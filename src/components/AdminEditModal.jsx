@@ -16,10 +16,7 @@ export default function AdminEditModal({
   item,
   onSaved,
 }) {
-  const { currentRole, ownerPin, adminPin, unlockWithPin } = useAuth()
-  const [pinInput, setPinInput] = useState('')
-  const [pinError, setPinError] = useState('')
-  const [isPinUnlocked, setIsPinUnlocked] = useState(false)
+  const { role } = useAuth()
   const [formData, setFormData] = useState({})
   const [saving, setSaving] = useState(false)
   const [deleteConfirm, setDeleteConfirm] = useState(false)
@@ -31,35 +28,12 @@ export default function AdminEditModal({
       setFormData({ ...item })
       setDeleteConfirm(false)
       setSaveSuccess(false)
-      setPinError('')
-      setPinInput('')
     }
   }, [item, isOpen])
 
-  // Determine if already unlocked as admin or owner
-  const isAuthorized =
-    isPinUnlocked ||
-    currentRole === 'owner' ||
-    currentRole === 'admin'
+  const isAuthorized = role === 'admin'
 
   if (!isOpen || !item) return null
-
-  const handlePinSubmit = (e) => {
-    e.preventDefault()
-    const entered = pinInput.trim()
-    const validOwnerPin = ownerPin || '1234'
-    const validAdminPin = adminPin || '8888'
-
-    if (entered === validOwnerPin || entered === validAdminPin) {
-      setIsPinUnlocked(true)
-      setPinError('')
-      if (typeof unlockWithPin === 'function') {
-        unlockWithPin(entered)
-      }
-    } else {
-      setPinError('Incorrect PIN. Enter Owner (1234) or Admin (8888) PIN.')
-    }
-  }
 
   const handleChange = (field, value) => {
     setFormData((prev) => {
@@ -163,38 +137,15 @@ export default function AdminEditModal({
               Admin Authentication Required
             </h3>
             <p className="text-xs text-[#52796f] mb-6 max-w-sm mx-auto">
-              Editing live accounting data requires Admin (8888) or Owner (1234) PIN authorization.
+              This account has read-only access. Sign in with an administrator account to edit records.
             </p>
-
-            <form onSubmit={handlePinSubmit} className="max-w-xs mx-auto">
-              <input
-                type="password"
-                maxLength={4}
-                value={pinInput}
-                onChange={(e) => setPinInput(e.target.value)}
-                placeholder="Enter 4-digit PIN"
-                className="w-full text-center text-xl font-mono tracking-widest py-3 px-4 border border-[#0e655d]/20 rounded-2xl bg-[#f4f7f4] focus:outline-none focus:ring-2 focus:ring-[#0e655d] mb-3 text-[#142d2a]"
-                autoFocus
-              />
-              {pinError && (
-                <p className="text-xs text-rose-600 mb-3 font-medium">{pinError}</p>
-              )}
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={onClose}
-                  className="flex-1 py-2.5 px-4 text-xs font-semibold text-[#52796f] bg-slate-100 rounded-xl hover:bg-slate-200 transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="flex-1 py-2.5 px-4 text-xs font-semibold text-white bg-[#0e655d] rounded-xl hover:bg-[#084d46] transition-colors shadow-sm"
-                >
-                  Unlock & Edit
-                </button>
-              </div>
-            </form>
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-xl bg-slate-100 px-4 py-2.5 text-xs font-semibold text-[#52796f] hover:bg-slate-200 transition-colors"
+            >
+              Close
+            </button>
           </div>
         ) : (
           /* Editable Form */

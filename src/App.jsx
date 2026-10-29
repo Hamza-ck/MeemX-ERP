@@ -118,7 +118,7 @@ export default function App() {
             <Route
               path="/tally"
               element={
-                <ProtectedRoute>
+                <ProtectedRoute adminOnly>
                   <TallyIntegrationPage />
                 </ProtectedRoute>
               }
@@ -129,7 +129,7 @@ export default function App() {
             <Route
               path="/settings"
               element={
-                <ProtectedRoute>
+                <ProtectedRoute adminOnly>
                   <SettingsControlPage />
                 </ProtectedRoute>
               }
@@ -137,7 +137,7 @@ export default function App() {
             <Route
               path="/control"
               element={
-                <ProtectedRoute>
+                <ProtectedRoute adminOnly>
                   <SettingsControlPage />
                 </ProtectedRoute>
               }
