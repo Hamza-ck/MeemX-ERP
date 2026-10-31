@@ -83,7 +83,7 @@ class MockQuery {
   }
 }
 
-function mockCloud({ snapshot = {}, role = 'owner', onUpsert = () => {} } = {}) {
+function mockCloud({ snapshot = {}, role = 'employee', onUpsert = () => {} } = {}) {
   const client = {
     role,
     snapshot,
@@ -282,7 +282,7 @@ describe('sync service', () => {
       parties: [{ id: 1, cloud_id: 'party-1', name: 'Offline change', local_dirty: true }],
       ledgers: [], materials: [], vouchers: [],
     }, [{ key: 'pending_cloud_deletes', value: '[]' }])
-    const cloud = mockCloud({ role: 'owner', snapshot: Object.fromEntries(
+    const cloud = mockCloud({ role: 'employee', snapshot: Object.fromEntries(
       ['parties', 'ledgers', 'materials', 'vouchers'].map((table) => [table, { data: [], error: null }])
     ) })
     const service = createSyncService({ cloud, database, isConfigured: true, dispatchUpdates() {}, logError() {} })
@@ -345,5 +345,78 @@ describe('sync service', () => {
     assert.equal(result.success, true)
     assert.equal(result.counts.parties, 501)
     assert.equal((await database.table('parties').toArray()).length, 501)
+  })
+
+  it('Step 3: owner edits a voucher -> sync -> cloud row updated; local_dirty cleared', async () => {
+    const database = new MemoryDatabase({
+      ...emptyTables(),
+      vouchers: [{ id: 10, voucher_no: 'V-10', voucher_type: 'sales', date: '2026-10-28', amount: 50, local_dirty: true }],
+    }, [{ key: 'pending_cloud_deletes', value: '[]' }])
+    const cloud = mockCloud({
+      role: 'owner',
+      snapshot: Object.fromEntries(['parties', 'ledgers', 'materials', 'vouchers'].map((t) => [t, { data: [], error: null }])),
+    })
+    const service = createSyncService({ cloud, database, isConfigured: true, dispatchUpdates() {} })
+
+    const result = await service.syncFromSupabase()
+    assert.equal(result.success, true)
+    const voucher = (await database.table('vouchers').toArray())[0]
+    assert.equal(voucher.local_dirty, false)
+    assert.equal(cloud.upserts.length, 1)
+    assert.equal(cloud.upserts[0].table, 'vouchers')
+  })
+
+  it('Step 3: employee edits a voucher -> sync -> skipped: 1, reason: role_not_permitted; local_dirty remains true', async () => {
+    const database = new MemoryDatabase({
+      ...emptyTables(),
+      vouchers: [{ id: 11, voucher_no: 'V-11', voucher_type: 'sales', date: '2026-10-28', amount: 80, local_dirty: true }],
+    }, [{ key: 'pending_cloud_deletes', value: '[]' }])
+    const cloud = mockCloud({
+      role: 'employee',
+      snapshot: Object.fromEntries(['parties', 'ledgers', 'materials', 'vouchers'].map((t) => [t, { data: [], error: null }])),
+    })
+    const service = createSyncService({ cloud, database, isConfigured: true, dispatchUpdates() {} })
+
+    const result = await service.syncFromSupabase()
+    assert.equal(result.success, true)
+    assert.equal(result.skipped, 1)
+    assert.equal(result.reason, 'role_not_permitted')
+    const voucher = (await database.table('vouchers').toArray())[0]
+    assert.equal(voucher.local_dirty, true)
+    assert.equal(cloud.upserts.length, 0)
+  })
+
+  it('Step 4: offline push succeeds when role cache < 24h old', async () => {
+    const database = new MemoryDatabase({
+      ...emptyTables(),
+      vouchers: [{ id: 12, voucher_no: 'V-12', voucher_type: 'sales', date: '2026-10-28', amount: 99, local_dirty: true }],
+    }, [
+      { key: 'pending_cloud_deletes', value: '[]' },
+      { key: 'last_verified_role', value: 'admin' },
+      { key: 'last_verified_at', value: new Date('2026-10-28T10:00:00Z').toISOString() },
+    ])
+    const cloud = mockCloud({
+      role: 'unknown',
+      snapshot: Object.fromEntries(['parties', 'ledgers', 'materials', 'vouchers'].map((t) => [t, { data: [], error: null }])),
+    })
+    // Network to profiles is simulated offline by returning error
+    cloud.from = (table) => {
+      if (table === 'profiles') throw new Error('Network offline')
+      return new MockQuery(cloud, table)
+    }
+
+    const service = createSyncService({
+      cloud,
+      database,
+      isConfigured: true,
+      dispatchUpdates() {},
+      now: () => new Date('2026-10-28T14:00:00Z'), // 4 hours later (< 24h)
+    })
+
+    const result = await service.syncFromSupabase()
+    assert.equal(result.success, true)
+    const voucher = (await database.table('vouchers').toArray())[0]
+    assert.equal(voucher.local_dirty, false)
+    assert.equal(cloud.upserts.length, 1)
   })
 })

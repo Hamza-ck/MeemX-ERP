@@ -5,7 +5,7 @@
  * rows are deliberately left untouched, while clean rows deleted from cloud are
  * removed locally so remote deletions converge on the next successful sync.
  */
-import { tallyLedgerCategory } from './tallyLedgerCategory'
+import { tallyLedgerCategory } from './tallyLedgerCategory.js'
 
 export function buildEntitySnapshot(
   localRows,

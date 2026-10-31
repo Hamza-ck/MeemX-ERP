@@ -21,11 +21,34 @@ import { createHash } from 'node:crypto'
  * Uses simple regex — no full XML parse needed.
  */
 export function countElements(xmlText) {
-  const voucherCount = (xmlText.match(/<VOUCHER[\s>]/gi) || []).length
-  const ledgerCount = (xmlText.match(/<LEDGER[\s>]/gi) || []).length
-  const stockCount = (xmlText.match(/<STOCKITEM[\s>]/gi) || []).length
-  const stockSummaryCount = (xmlText.match(/<DSPSTKINFO[\s>]/gi) || []).length
+  const voucherCount      = (xmlText.match(/<VOUCHER[\s>]/gi)      || []).length
+  const ledgerCount       = (xmlText.match(/<LEDGER[\s>]/gi)       || []).length
+  const stockCount        = (xmlText.match(/<STOCKITEM[\s>]/gi)    || []).length
+  const stockSummaryCount = (xmlText.match(/<DSPSTKINFO[\s>]/gi)   || []).length
   return { voucherCount, ledgerCount, stockCount, stockSummaryCount }
+}
+
+/**
+ * Extract the latest voucher date from Tally XML (ISO string).
+ * Returns null if no vouchers or dates found.
+ */
+export function extractMaxVoucherDate(xmlText) {
+  const matches = xmlText.match(/<(?:DATE|EFFECTIVEDATE)>(\d{8}|\d{4}-\d{2}-\d{2})<\/(?:DATE|EFFECTIVEDATE)>/gi)
+  if (!matches) return null
+  let maxDate = null
+  for (const m of matches) {
+    const raw = m.replace(/<\/?(?:DATE|EFFECTIVEDATE)>/gi, '').trim()
+    let iso = null
+    if (/^\d{8}$/.test(raw)) {
+      iso = `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`
+    } else if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+      iso = raw
+    }
+    if (iso && (!maxDate || iso > maxDate)) {
+      maxDate = iso
+    }
+  }
+  return maxDate ? `${maxDate}T00:00:00.000Z` : null
 }
 
 /**
@@ -133,6 +156,56 @@ export function monthlyChunks(fromDateStr, toDateStr) {
 
     // Move to first day of next month
     cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1)
+  }
+
+  return chunks
+}
+
+/**
+ * Generate N-day chunks between fromDate and toDate.
+ * Each chunk: { fromDate: 'YYYYMMDD', toDate: 'YYYYMMDD', label: 'YYYY-MM-DD → YYYY-MM-DD' }
+ *
+ * @param {string} fromDateStr 'YYYY-MM-DD'
+ * @param {string} toDateStr   'YYYY-MM-DD'
+ * @param {number} [chunkDays] Number of days per chunk (default 15)
+ * @returns {Array<{ fromDate: string, toDate: string, label: string }>}
+ */
+export function dayChunks(fromDateStr, toDateStr, chunkDays = 15) {
+  const from = new Date(fromDateStr + 'T00:00:00')
+  const to = new Date(toDateStr + 'T00:00:00')
+  if (isNaN(from.getTime()) || isNaN(to.getTime())) {
+    throw new Error(`Invalid date range: ${fromDateStr} → ${toDateStr}`)
+  }
+  if (from > to) {
+    throw new Error(`--from (${fromDateStr}) must be before --to (${toDateStr})`)
+  }
+
+  const chunks = []
+  let cursor = new Date(from)
+  const days = Math.max(1, Number.parseInt(chunkDays, 10) || 15)
+
+  const fmtCompact = (d) =>
+    String(d.getFullYear()) +
+    String(d.getMonth() + 1).padStart(2, '0') +
+    String(d.getDate()).padStart(2, '0')
+
+  const fmtIso = (d) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+
+  while (cursor <= to) {
+    const chunkStart = new Date(cursor)
+    const endCandidate = new Date(cursor)
+    endCandidate.setDate(endCandidate.getDate() + days - 1)
+    const chunkEnd = endCandidate < to ? endCandidate : new Date(to)
+
+    chunks.push({
+      fromDate: fmtCompact(chunkStart),
+      toDate: fmtCompact(chunkEnd),
+      label: `${fmtIso(chunkStart)} → ${fmtIso(chunkEnd)}`,
+    })
+
+    cursor = new Date(chunkEnd)
+    cursor.setDate(cursor.getDate() + 1)
   }
 
   return chunks

@@ -173,21 +173,34 @@ export async function getLastSyncDate(config, accessToken, fetchFn = globalThis.
 
 /**
  * Update connector state after a successful sync.
+ * Stores maxVoucherDate when available, falling back to current time.
  *
  * @param {SupabaseConfig} config
  * @param {string} accessToken
  * @param {string} [jobId]  UUID of the last committed import job
+ * @param {string} [maxVoucherDate]  Max voucher date from imported data
  * @param {Function} [fetchFn]
  */
-export async function setLastSyncDate(config, accessToken, jobId, fetchFn = globalThis.fetch) {
+export async function setLastSyncDate(config, accessToken, jobId, maxVoucherDate = null, fetchFn = globalThis.fetch) {
+  let actualFetch = fetchFn
+  let actualMaxDate = maxVoucherDate
+  if (typeof maxVoucherDate === 'function') {
+    actualFetch = maxVoucherDate
+    actualMaxDate = null
+  }
+
+  const importDate = actualMaxDate
+    ? (actualMaxDate.includes('T') ? actualMaxDate : new Date(actualMaxDate + 'T00:00:00Z').toISOString())
+    : new Date().toISOString()
+
   const url = `${config.url}/rest/v1/accounting_refresh_state?id=eq.1`
   const body = {
-    last_successful_import_at: new Date().toISOString(),
+    last_successful_import_at: importDate,
     updated_at: new Date().toISOString(),
   }
   if (jobId) body.last_successful_import_job = jobId
 
-  await fetchFn(url, {
+  await actualFetch(url, {
     method: 'PATCH',
     headers: {
       'Authorization': `Bearer ${accessToken}`,
@@ -197,6 +210,63 @@ export async function setLastSyncDate(config, accessToken, jobId, fetchFn = glob
     },
     body: JSON.stringify(body),
   })
+}
+
+/**
+ * Select-then-upsert helper for vouchers, ledgers, materials.
+ * When the incoming row exists and cloud updated_at is newer than incoming source timestamp,
+ * emits a structured conflict log:
+ * { "event": "conflict", "table": "vouchers", "key": "<voucher_no>", "cloud_updated_at": "...", "incoming_at": "..." }
+ * Does not block the write so no data is lost.
+ */
+export async function upsertWithConflictCheck(config, accessToken, table, payload, keyField = 'id', incomingAt = null, fetchFn = globalThis.fetch) {
+  const keyValue = payload[keyField]
+  if (keyValue) {
+    try {
+      const selectUrl = `${config.url}/rest/v1/${table}?${keyField}=eq.${encodeURIComponent(keyValue)}&select=id,updated_at`
+      const selRes = await fetchFn(selectUrl, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'apikey': config.anonKey,
+          'Accept': 'application/json',
+        },
+      })
+      if (selRes.ok) {
+        const existingRows = await selRes.json()
+        if (Array.isArray(existingRows) && existingRows.length > 0) {
+          const cloudUpdatedAt = existingRows[0].updated_at
+          const incomingTimestamp = incomingAt || payload.updated_at || payload.date
+          if (cloudUpdatedAt && incomingTimestamp && new Date(cloudUpdatedAt) > new Date(incomingTimestamp)) {
+            console.log(JSON.stringify({
+              event: 'conflict',
+              table,
+              key: String(keyValue),
+              cloud_updated_at: cloudUpdatedAt,
+              incoming_at: incomingTimestamp,
+            }))
+          }
+        }
+      }
+    } catch { /* proceed to write */ }
+  }
+
+  const url = `${config.url}/rest/v1/${table}`
+  const res = await fetchFn(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'apikey': config.anonKey,
+      'Content-Type': 'application/json',
+      'Prefer': 'resolution=merge-duplicates,return=representation',
+    },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    throw new Error(`Failed to upsert ${table}: ${JSON.stringify(body)}`)
+  }
+  return res.json()
 }
 
 /** Edge function returned an HTTP error. */

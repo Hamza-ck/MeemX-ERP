@@ -115,6 +115,8 @@ Run commands from the repository root:
 - **Incremental Sync**: Syncs recent entries with a 7-day safety overlap to catch edited vouchers:
   ```bash
   node connector/sync.mjs incremental
+  # First-run window option (default 30 days) and sequential chunk size (default 15 days):
+  node connector/sync.mjs incremental --max-days 30 --chunk-days 10
   ```
 
 - **Continuous Background Loop**: Automatically synchronizes every N minutes (default 15 minutes) until stopped:

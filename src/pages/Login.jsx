@@ -20,8 +20,8 @@ export default function Login() {
     }
   }, [isAuthenticated, navigate])
 
-  const validatePin = useCallback((inputPin) => {
-    const result = unlockWithPin(inputPin)
+  const validatePin = useCallback(async (inputPin) => {
+    const result = await unlockWithPin(inputPin)
     if (result.success) {
       navigate('/')
     } else {

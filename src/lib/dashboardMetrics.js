@@ -1,4 +1,4 @@
-import { tallyLedgerCategory } from './tallyLedgerCategory'
+import { tallyLedgerCategory } from './tallyLedgerCategory.js'
 
 const dateKey = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 
@@ -46,17 +46,18 @@ export function calculateDashboardMetrics(vouchers, ledgers, now = new Date()) {
           const entryName = String(entry.ledger_name || '').trim().toLowerCase()
           const ledger = ledgersByName.get(entryName)
           const category = ledger ? categoryOf(ledger) : ''
-          const entryAmount = Math.abs(Number(entry.amount) || 0)
-          const isDebit = Boolean(entry.is_debit)
+          const amount = Number(entry.amount) || 0
+          const isDebit = typeof entry.is_debit === 'boolean' ? entry.is_debit : amount >= 0
+          const abs = Math.abs(amount)
           if (!ledger && entryName && entryName !== (voucher.party_name || '').trim().toLowerCase()) {
             incompleteCostDates.add(date)
           }
           if (category === 'expense') {
-            const expense = isDebit ? entryAmount : -entryAmount
+            const expense = isDebit ? abs : -abs
             expensesByDate.set(date, (expensesByDate.get(date) || 0) + expense)
             result -= expense
           } else if (category === 'income') {
-            result += isDebit ? -entryAmount : entryAmount
+            result += isDebit ? -abs : abs
           }
         }
         accountingResultByDate.set(date, (accountingResultByDate.get(date) || 0) + result)

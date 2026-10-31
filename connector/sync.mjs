@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url'
 
 import { loadConfig, redactUrl } from './config.mjs'
 import { sendToTally, buildExportRequest, TallyConnectionError } from './tally_client.mjs'
-import { countElements, hasData, buildPreviewPayload, monthlyChunks } from './normalize.mjs'
+import { countElements, hasData, buildPreviewPayload, monthlyChunks, dayChunks, extractMaxVoucherDate } from './normalize.mjs'
 import { authenticate, previewAndCommit, getLastSyncDate, setLastSyncDate } from './supabase_client.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -40,6 +40,8 @@ function parseCliArgs(argv) {
       'tally-host':   { type: 'string' },
       'tally-port':   { type: 'string' },
       'tally-company':{ type: 'string' },
+      'max-days':     { type: 'string',  default: '30' },
+      'chunk-days':   { type: 'string',  default: '15' },
       help:           { type: 'boolean', short: 'h', default: false },
     },
     allowPositionals: true,
@@ -76,6 +78,8 @@ Commands:
                --to   YYYY-MM-DD  (default: today)
 
   incremental  Sync from (last successful sync - 7 days) to today.
+               --max-days N       Days to pull on first run (default: 30)
+               --chunk-days N     Days per chunk window (default: 15)
                --loop             Run repeatedly until Ctrl+C
                --every N          Minutes between runs (default: 15)
 
@@ -84,6 +88,8 @@ Options:
   --tally-port PORT       Override TALLY_PORT (default: 9000)
   --tally-company NAME    Select a company (defaults to the active company in Tally)
   --allow-remote          Allow non-loopback Tally host (UNSAFE)
+  --max-days N            Lookback window in days for first-run incremental (default: 30)
+  --chunk-days N          Days per chunk window for sequential pull (default: 15)
   -h, --help              Show this help
 `)
 }
@@ -276,13 +282,15 @@ async function cmdPull(config, values) {
     console.error(`   ❌ Stock values failed: ${err.message}`)
   }
 
-  // 2. Vouchers in monthly chunks from Tally's dated voucher collection.
-  const chunks = monthlyChunks(fromDate, toDate)
-  console.log(`\n📋 Pulling vouchers in ${chunks.length} monthly chunk(s)...`)
+  // 2. Vouchers in sequential chunk windows from Tally's dated voucher collection.
+  const chunkDays = values['chunk-days'] ? Number.parseInt(values['chunk-days'], 10) : 15
+  const chunks = chunkDays ? dayChunks(fromDate, toDate, chunkDays) : monthlyChunks(fromDate, toDate)
+  console.log(`\n📋 Pulling vouchers in ${chunks.length} chunk(s) (${chunkDays || 15} days each)...`)
 
   let totalInserted = 0
   let totalSkipped = 0
   let lastJobId = null
+  let maxVoucherDate = null
 
   for (const chunk of chunks) {
     // 500ms pause allows Tally's single-threaded HTTP listener to recycle sockets cleanly
@@ -297,6 +305,11 @@ async function cmdPull(config, values) {
       if (!hasData(response)) {
         console.log(`   ${chunk.label}: no data`)
         continue
+      }
+
+      const chunkMaxDate = extractMaxVoucherDate(response)
+      if (chunkMaxDate && (!maxVoucherDate || chunkMaxDate > maxVoucherDate)) {
+        maxVoucherDate = chunkMaxDate
       }
 
       const payload = buildPreviewPayload(
@@ -324,7 +337,7 @@ async function cmdPull(config, values) {
 
   if (failures === 0 && lastJobId) {
     try {
-      await setLastSyncDate(config.supabase, accessToken, lastJobId)
+      await setLastSyncDate(config.supabase, accessToken, lastJobId, maxVoucherDate)
     } catch { /* best effort */ }
   }
 
@@ -357,6 +370,9 @@ async function cmdIncremental(config, values) {
     lastSync = await getLastSyncDate(config.supabase, accessToken)
   } catch { /* first run */ }
 
+  const parsedMaxDays = Number.parseInt(values['max-days'] || '30', 10)
+  const maxDays = Number.isFinite(parsedMaxDays) && parsedMaxDays > 0 ? parsedMaxDays : 30
+
   const today = localDateString(new Date())
   let fromDate
 
@@ -368,11 +384,11 @@ async function cmdIncremental(config, values) {
     console.log(`   Last sync: ${lastSync}`)
     console.log(`   Pulling from ${fromDate} (7-day overlap) to ${today}`)
   } else {
-    // First run — default to 90 days back
+    // First run — default to max-days (default 30, not 90)
     const d = new Date()
-    d.setDate(d.getDate() - 90)
+    d.setDate(d.getDate() - maxDays)
     fromDate = localDateString(d)
-    console.log(`   First run — pulling last 90 days (${fromDate} to ${today})`)
+    console.log(`   First run — pulling last ${maxDays} days (${fromDate} to ${today})`)
   }
 
   // Delegate to pull logic
