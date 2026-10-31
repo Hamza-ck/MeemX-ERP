@@ -391,7 +391,7 @@ async function cmdPull(config, values) {
  * re-reads the whole current financial year and reconciles it, which self-heals edits
  * to old vouchers, deletions, and anything an earlier failed run missed.
  */
-async function cmdIncremental(config, values) {
+async function cmdIncremental(config, _values) {
   const release = acquireLock()
   if (!release) {
     console.warn('⏳ Another sync is already running; skipping this one.')

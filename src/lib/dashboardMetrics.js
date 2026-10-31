@@ -39,10 +39,22 @@ function buildMetricWindow(now = new Date()) {
     sales7DaysByDate.set(date, bucket)
   }
 
+  const prevMonthDate = new Date(todayDate.getFullYear(), todayDate.getMonth() - 1, 1)
+  const prevMonthPrefix = formatLocalDateKey(prevMonthDate).slice(0, 7)
+  const currentMonthName = todayDate.toLocaleDateString('en-IN', { month: 'short' })
+  const currentMonthFullName = todayDate.toLocaleDateString('en-IN', { month: 'long' })
+  const prevMonthName = prevMonthDate.toLocaleDateString('en-IN', { month: 'short' })
+  const prevMonthFullName = prevMonthDate.toLocaleDateString('en-IN', { month: 'long' })
+
   return {
     today,
     weekStart: sales7Days[0].date,
     monthPrefix,
+    prevMonthPrefix,
+    currentMonthName,
+    currentMonthFullName,
+    prevMonthName,
+    prevMonthFullName,
     sales7Days,
     sales7DaysByDate,
   }
@@ -181,6 +193,11 @@ export function calculateDashboardMetrics(vouchers = [], ledgers = [], now = new
     today,
     weekStart,
     monthPrefix,
+    prevMonthPrefix,
+    currentMonthName,
+    currentMonthFullName,
+    prevMonthName,
+    prevMonthFullName,
     sales7Days,
     sales7DaysByDate,
   } = buildMetricWindow(now)
@@ -199,29 +216,37 @@ export function calculateDashboardMetrics(vouchers = [], ledgers = [], now = new
   let salesToday = 0
   let salesWeek = 0
   let salesMonth = 0
+  let salesPrevMonth = 0
   let netSalesToday = 0
   let netSalesWeek = 0
   let netSalesMonth = 0
+  let netSalesPrevMonth = 0
   let expensesToday = 0
   let expensesWeek = 0
   let expensesMonth = 0
+  let expensesPrevMonth = 0
 
   let itemCostToday = 0
   let itemCostWeek = 0
   let itemCostMonth = 0
+  let itemCostPrevMonth = 0
   let purchasesToday = 0
   let purchasesWeek = 0
   let purchasesMonth = 0
+  let purchasesPrevMonth = 0
 
   let hasSalesToday = false
   let hasSalesWeek = false
   let hasSalesMonth = false
+  let hasSalesPrevMonth = false
   let hasItemsToday = false
   let hasItemsWeek = false
   let hasItemsMonth = false
+  let hasItemsPrevMonth = false
   let completeCostToday = true
   let completeCostWeek = true
   let completeCostMonth = true
+  let completeCostPrevMonth = true
 
   for (const voucher of vouchers || []) {
     if (voucher?.deleted_at) continue
@@ -231,6 +256,7 @@ export function calculateDashboardMetrics(vouchers = [], ledgers = [], now = new
     const isToday = dateKey === today
     const isWeek = dateKey >= weekStart && dateKey <= today
     const isMonth = dateKey.startsWith(monthPrefix) && dateKey <= today
+    const isPrevMonth = dateKey.startsWith(prevMonthPrefix)
 
     const vType = voucher?.voucher_type
 
@@ -256,6 +282,11 @@ export function calculateDashboardMetrics(vouchers = [], ledgers = [], now = new
         salesMonth += signedGross
         netSalesMonth += signedNet
       }
+      if (isPrevMonth) {
+        hasSalesPrevMonth = true
+        salesPrevMonth += signedGross
+        netSalesPrevMonth += signedNet
+      }
 
       const itemCost = getSaleItemCost(voucher, materialCostByKey)
       if (isToday) {
@@ -273,11 +304,17 @@ export function calculateDashboardMetrics(vouchers = [], ledgers = [], now = new
         if (itemCost.complete) itemCostMonth += itemCost.cost * sign
         else if (vType === 'sales') completeCostMonth = false
       }
+      if (isPrevMonth) {
+        if (itemCost.hasItems) hasItemsPrevMonth = true
+        if (itemCost.complete) itemCostPrevMonth += itemCost.cost * sign
+        else if (vType === 'sales') completeCostPrevMonth = false
+      }
     } else if (vType === 'purchase' || vType === 'debit_note') {
       const sign = vType === 'debit_note' ? -1 : 1
       if (isToday) purchasesToday += amount * sign
       if (isWeek) purchasesWeek += amount * sign
       if (isMonth) purchasesMonth += amount * sign
+      if (isPrevMonth) purchasesPrevMonth += amount * sign
     } else {
       const entries = Array.isArray(voucher?.ledger_entries) ? voucher.ledger_entries : []
       for (const entry of entries) {
@@ -287,6 +324,7 @@ export function calculateDashboardMetrics(vouchers = [], ledgers = [], now = new
           if (isToday) purchasesToday += pAmt
           if (isWeek) purchasesWeek += pAmt
           if (isMonth) purchasesMonth += pAmt
+          if (isPrevMonth) purchasesPrevMonth += pAmt
         }
       }
     }
@@ -297,6 +335,7 @@ export function calculateDashboardMetrics(vouchers = [], ledgers = [], now = new
       if (isToday) expensesToday += expSum
       if (isWeek) expensesWeek += expSum
       if (isMonth) expensesMonth += expSum
+      if (isPrevMonth) expensesPrevMonth += expSum
     }
   }
 
@@ -328,24 +367,33 @@ export function calculateDashboardMetrics(vouchers = [], ledgers = [], now = new
   const resToday = resolveOperatingResult(hasSalesToday, netSalesToday, expensesToday, hasItemsToday, completeCostToday, itemCostToday, purchasesToday)
   const resWeek = resolveOperatingResult(hasSalesWeek, netSalesWeek, expensesWeek, hasItemsWeek, completeCostWeek, itemCostWeek, purchasesWeek)
   const resMonth = resolveOperatingResult(hasSalesMonth, netSalesMonth, expensesMonth, hasItemsMonth, completeCostMonth, itemCostMonth, purchasesMonth)
+  const resPrevMonth = resolveOperatingResult(hasSalesPrevMonth, netSalesPrevMonth, expensesPrevMonth, hasItemsPrevMonth, completeCostPrevMonth, itemCostPrevMonth, purchasesPrevMonth)
 
   return {
     salesToday,
     salesWeek,
     salesMonth,
+    salesPrevMonth,
     expensesToday,
     expensesWeek,
     expensesMonth,
+    expensesPrevMonth,
     operatingResultToday: resToday.value,
     operatingResultWeek: resWeek.value,
     operatingResultMonth: resMonth.value,
+    operatingResultPrevMonth: resPrevMonth.value,
     operatingResultBasis: {
       today: resToday.basis,
       week: resWeek.basis,
       month: resMonth.basis,
+      prevMonth: resPrevMonth.basis,
     },
     sales7Days,
     sales7DaysTotal: salesWeek,
+    currentMonthName,
+    currentMonthFullName,
+    prevMonthName,
+    prevMonthFullName,
   }
 }
 
@@ -354,16 +402,26 @@ export function calculateSalesMetrics(vouchers = [], now = new Date()) {
     salesToday,
     salesWeek,
     salesMonth,
+    salesPrevMonth,
     sales7Days,
     sales7DaysTotal,
+    currentMonthName,
+    currentMonthFullName,
+    prevMonthName,
+    prevMonthFullName,
   } = calculateDashboardMetrics(vouchers, [], now)
 
   return {
     salesToday,
     salesWeek,
     salesMonth,
+    salesPrevMonth,
     sales7Days,
     sales7DaysTotal,
+    currentMonthName,
+    currentMonthFullName,
+    prevMonthName,
+    prevMonthFullName,
   }
 }
 

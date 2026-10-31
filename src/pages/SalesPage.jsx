@@ -29,6 +29,11 @@ export default function SalesPage() {
   const formatInvoiceDate = (dateStr) => {
     if (!dateStr) return 'Today'
     try {
+      const match = String(dateStr).match(/^(\d{4})-(\d{2})-(\d{2})/)
+      if (match) {
+        const d = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+        return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
+      }
       const d = new Date(dateStr)
       if (isNaN(d.getTime())) return dateStr
       return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
@@ -55,7 +60,12 @@ export default function SalesPage() {
 
       const dbVouchers = allVouchers
         .filter((v) => v.voucher_type === 'sales')
-        .sort((a, b) => (Number(b.id) || 0) - (Number(a.id) || 0))
+        .sort((a, b) => {
+          const dateA = String(a.date || '')
+          const dateB = String(b.date || '')
+          if (dateB !== dateA) return dateB.localeCompare(dateA)
+          return String(b.voucher_no || '').localeCompare(String(a.voucher_no || ''), undefined, { numeric: true })
+        })
 
       if (dbVouchers && dbVouchers.length > 0) {
         const mapped = dbVouchers.map((v) => {

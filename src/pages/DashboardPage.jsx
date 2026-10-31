@@ -100,11 +100,12 @@ export default function DashboardPage() {
         // Keep dashboard date totals in one pass through voucher history.
         const calculated = calculateDashboardMetrics(vouchers, ledgers, new Date(), materials)
         const {
-          salesToday, salesWeek, salesMonth,
-          expensesToday, expensesWeek, expensesMonth,
-          operatingResultToday, operatingResultWeek, operatingResultMonth,
+          salesToday, salesWeek, salesMonth, salesPrevMonth,
+          expensesToday, expensesWeek, expensesMonth, expensesPrevMonth,
+          operatingResultToday, operatingResultWeek, operatingResultMonth, operatingResultPrevMonth,
           sales7Days, sales7DaysTotal,
           operatingResultBasis,
+          currentMonthName, currentMonthFullName, prevMonthName, prevMonthFullName,
         } = calculated
 
         const last7 = sales7Days.map((item) => ({ ...item, display: formatMoney(item.amount) }))
@@ -120,15 +121,22 @@ export default function DashboardPage() {
           salesToday,
           salesWeek,
           salesMonth,
+          salesPrevMonth,
           expensesToday,
           expensesWeek,
           expensesMonth,
+          expensesPrevMonth,
           operatingResultToday,
           operatingResultWeek,
           operatingResultMonth,
+          operatingResultPrevMonth,
           operatingResultBasis,
           sales7Days: last7,
           sales7DaysTotal,
+          currentMonthName,
+          currentMonthFullName,
+          prevMonthName,
+          prevMonthFullName,
         })
 
         const topDebtors = enrichedDebtors
@@ -233,14 +241,58 @@ export default function DashboardPage() {
         inventory: { value: stockVal, detail: 'Stock value', note: stockNote },
         loans: { value: loansVal, detail: 'Net balance' },
       }
+    } else if (period === 'Last month') {
+      const sVal = liveMetrics?.salesPrevMonth || 0
+      const pVal = liveMetrics?.operatingResultPrevMonth
+      const eVal = liveMetrics?.expensesPrevMonth || 0
+      const prevName = liveMetrics?.prevMonthFullName || 'Last month'
+      return {
+        sales: { value: formatMoney(sVal), diff: `${prevName} total`, isPositive: true },
+        profit: { value: pVal == null ? '—' : formatMoney(pVal), diff: pVal == null ? 'Profit details incomplete' : liveMetrics?.operatingResultBasis?.prevMonth || 'Sales less item costs & expenses', isPositive: pVal != null && pVal >= 0 },
+        expenses: { value: formatMoney(eVal), diff: `${prevName} expenses`, isPositive: false },
+        debtors: { value: debtorsVal, detail: debtorsDetail },
+        creditors: { value: creditorsVal, detail: creditorsDetail },
+        inventory: { value: stockVal, detail: 'Stock value', note: stockNote },
+        loans: { value: loansVal, detail: 'Net balance' },
+      }
     } else {
       const sVal = liveMetrics?.salesMonth || 0
       const pVal = liveMetrics?.operatingResultMonth
       const eVal = liveMetrics?.expensesMonth || 0
+      const currFull = liveMetrics?.currentMonthFullName || 'This month'
+      const currShort = liveMetrics?.currentMonthName || 'Nov'
+      const prevShort = liveMetrics?.prevMonthName || 'Oct'
+      const prevSalesVal = liveMetrics?.salesPrevMonth || 0
+      const prevExpVal = liveMetrics?.expensesPrevMonth || 0
+      const prevProfitVal = liveMetrics?.operatingResultPrevMonth
       return {
-        sales: { value: formatMoney(sVal), diff: sVal > 0 ? 'This month' : 'No sales this month', isPositive: true },
-        profit: { value: pVal == null ? '—' : formatMoney(pVal), diff: pVal == null ? 'Profit details incomplete' : liveMetrics?.operatingResultBasis?.month || 'Sales less item costs & expenses', isPositive: pVal != null && pVal >= 0 },
-        expenses: { value: formatMoney(eVal), diff: eVal > 0 ? 'Monthly expenses' : 'No expenses', isPositive: false },
+        sales: {
+          value: formatMoney(sVal),
+          diff: sVal > 0
+            ? `${currFull} revenue`
+            : prevSalesVal > 0
+            ? `No ${currShort} sales yet · ${prevShort}: ${formatMoney(prevSalesVal)}`
+            : 'No sales this month',
+          isPositive: true,
+        },
+        profit: {
+          value: pVal == null ? '—' : formatMoney(pVal),
+          diff: pVal == null
+            ? 'Profit details incomplete'
+            : sVal === 0 && prevProfitVal != null
+            ? `No ${currShort} profit yet · ${prevShort}: ${formatMoney(prevProfitVal)}`
+            : liveMetrics?.operatingResultBasis?.month || 'Sales less item costs & expenses',
+          isPositive: pVal != null && pVal >= 0,
+        },
+        expenses: {
+          value: formatMoney(eVal),
+          diff: eVal > 0
+            ? 'Monthly expenses'
+            : prevExpVal > 0
+            ? `No ${currShort} expenses · ${prevShort}: ${formatMoney(prevExpVal)}`
+            : 'No expenses',
+          isPositive: false,
+        },
         debtors: { value: debtorsVal, detail: debtorsDetail },
         creditors: { value: creditorsVal, detail: creditorsDetail },
         inventory: { value: stockVal, detail: 'Stock value', note: stockNote },
@@ -260,6 +312,15 @@ export default function DashboardPage() {
     { day: 'Sun', amount: 0, display: '₹0' },
   ]
   const sales7DaysTotal = liveMetrics?.sales7DaysTotal || 0
+
+  // Supported periods
+  const periodOptions = useMemo(() => {
+    const list = ['Today', 'Week', 'Month']
+    if ((liveMetrics?.salesPrevMonth || 0) > 0) {
+      list.push('Last month')
+    }
+    return list
+  }, [liveMetrics?.salesPrevMonth])
 
   // Money to collect list
   const moneyToCollect = liveDebtors || []
@@ -309,7 +370,13 @@ export default function DashboardPage() {
   const cardDefinitions = {
     sales: {
       id: 'sales',
-      label: period === 'Today' ? 'Sales today' : period === 'Week' ? 'Sales this week' : 'Sales this month',
+      label: period === 'Today'
+        ? 'Sales today'
+        : period === 'Week'
+        ? 'Sales this week'
+        : period === 'Last month'
+        ? `Sales in ${liveMetrics?.prevMonthFullName || 'Last month'}`
+        : `Sales this month (${liveMetrics?.currentMonthFullName || 'Current'})`,
       to: '/sales',
       value: metrics.sales.value,
       badge: metrics.sales.diff,
@@ -317,7 +384,7 @@ export default function DashboardPage() {
     },
     profit: {
       id: 'profit',
-      label: 'Operating result',
+      label: period === 'Last month' ? `Operating result (${liveMetrics?.prevMonthFullName || 'Last month'})` : 'Operating result',
       to: '/sales',
       value: metrics.profit.value,
       badge: metrics.profit.diff,
@@ -325,7 +392,7 @@ export default function DashboardPage() {
     },
     expenses: {
       id: 'expenses',
-      label: 'Expenses',
+      label: period === 'Last month' ? `Expenses (${liveMetrics?.prevMonthFullName || 'Last month'})` : 'Expenses',
       to: '/expenses',
       value: metrics.expenses.value,
       badge: metrics.expenses.diff,
@@ -439,9 +506,9 @@ export default function DashboardPage() {
               {isAdmin ? 'Admin account' : 'Owner view'}
             </span>
 
-            {/* Time Filter Pills: Today / Week / Month */}
+            {/* Time Filter Pills: Today / Week / Month / Last month */}
             <div className="flex items-center rounded-2xl bg-white p-1 border border-[#e1e9e3] shadow-xs">
-              {['Today', 'Week', 'Month'].map((p) => (
+              {periodOptions.map((p) => (
                 <button
                   key={p}
                   type="button"
@@ -469,7 +536,7 @@ export default function DashboardPage() {
 
         {/* Mobile Period Filter (PDF Page 1) */}
         <div className="mb-4 flex items-center justify-between rounded-2xl bg-white p-1 border border-[#e1e9e3] shadow-xs lg:hidden">
-          {['Today', 'Week', 'Month'].map((p) => (
+          {periodOptions.map((p) => (
             <button
               key={p}
               type="button"
@@ -533,6 +600,50 @@ export default function DashboardPage() {
               className="flex items-center gap-1.5 text-xs font-bold text-[#0e655d] hover:underline"
             >
               <Sliders size={14} /> Customize owner layout
+            </button>
+          </div>
+        )}
+
+        {/* ================= NEW MONTH BANNER ================= */}
+        {period === 'Month' && (liveMetrics?.salesMonth || 0) === 0 && (liveMetrics?.salesPrevMonth || 0) > 0 && (
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[#cbe4d7] bg-[#eef7f2] p-3 sm:p-4 text-xs">
+            <div className="flex items-center gap-2 text-[#134e40]">
+              <span className="text-base leading-none">📅</span>
+              <div>
+                <strong className="font-extrabold text-[#0e655d]">{liveMetrics?.currentMonthFullName || 'November'} has just started.</strong>
+                <span className="ml-1 text-[#3c6b5e]">
+                  No sales vouchers entered in Tally for {liveMetrics?.currentMonthFullName || 'this month'} yet. Your existing records are safe and intact.
+                </span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setPeriod('Last month')}
+              className="ml-auto inline-flex items-center gap-1.5 rounded-xl bg-[#0e655d] px-3.5 py-1.5 font-bold text-white shadow-xs hover:bg-[#095049] transition active:scale-95 cursor-pointer"
+            >
+              View {liveMetrics?.prevMonthFullName || 'October'} summary ({formatMoney(liveMetrics.salesPrevMonth)}) &rarr;
+            </button>
+          </div>
+        )}
+
+        {/* ================= VIEWING LAST MONTH BANNER ================= */}
+        {period === 'Last month' && (
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[#cbe4d7] bg-[#eef7f2] p-3 sm:p-4 text-xs">
+            <div className="flex items-center gap-2 text-[#134e40]">
+              <span className="text-base leading-none">📊</span>
+              <div>
+                <strong className="font-extrabold text-[#0e655d]">Viewing {liveMetrics?.prevMonthFullName || 'October'} closed summary.</strong>
+                <span className="ml-1 text-[#3c6b5e]">
+                  Showing complete month totals ({formatMoney(liveMetrics?.salesPrevMonth || 0)} sales).
+                </span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setPeriod('Month')}
+              className="ml-auto inline-flex items-center gap-1.5 rounded-xl border border-[#0e655d] bg-white px-3.5 py-1.5 font-bold text-[#0e655d] hover:bg-[#e4f3ed] transition active:scale-95 cursor-pointer"
+            >
+              Switch to {liveMetrics?.currentMonthFullName || 'November'} (Current) &rarr;
             </button>
           </div>
         )}

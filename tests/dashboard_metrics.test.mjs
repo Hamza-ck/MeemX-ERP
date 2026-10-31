@@ -63,4 +63,22 @@ describe('calculateSalesMetrics', () => {
     assert.equal(result.salesToday, 100)
     assert.equal(result.operatingResultToday, null)
   })
+
+  it('tracks prior month sales, expenses and operating result when a new month begins', () => {
+    const nov1 = new Date(2026, 10, 1, 10)
+    const vouchers = [
+      { voucher_type: 'sales', date: '2026-10-29', amount: 500, items: [{ qty: 1, cost_rate: 200 }] },
+      { voucher_type: 'sales', date: '2026-10-28', amount: 300, items: [{ qty: 1, cost_rate: 100 }] },
+      { voucher_type: 'payment', party_name: 'Rent', date: '2026-10-15', amount: 100 },
+    ]
+    const ledgers = [{ name: 'Rent', group: 'Indirect Expenses', category: 'expense' }]
+    const result = calculateDashboardMetrics(vouchers, ledgers, nov1)
+
+    assert.equal(result.salesToday, 0)
+    assert.equal(result.salesMonth, 0)
+    assert.equal(result.salesPrevMonth, 800)
+    assert.equal(result.expensesPrevMonth, 100)
+    assert.equal(result.operatingResultPrevMonth, 400)
+    assert.equal(result.prevMonthName, 'Oct')
+  })
 })
