@@ -21,8 +21,12 @@ import { fileURLToPath } from 'node:url'
 
 import { loadConfig, redactUrl } from './config.mjs'
 import { sendToTally, buildExportRequest, TallyConnectionError } from './tally_client.mjs'
-import { countElements, hasData, buildPreviewPayload, monthlyChunks, dayChunks, extractMaxVoucherDate } from './normalize.mjs'
+import {
+  countElements, hasData, buildPreviewPayload, monthlyChunks, dayChunks,
+  extractMaxVoucherDate, extractGroupParents, ymdToIso, splitRange,
+} from './normalize.mjs'
 import { authenticate, previewAndCommit, getLastSyncDate, setLastSyncDate } from './supabase_client.mjs'
+import { sha256, loadState, saveState, acquireLock, financialYearStart } from './state.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -218,6 +222,11 @@ async function syncVoucherRange({ config, accessToken, state, fromDate, toDate, 
   )
   if (!/<ENVELOPE/i.test(response)) throw new Error('Tally returned a response without an <ENVELOPE>; refusing to reconcile.')
 
+  if (!hasData(response)) {
+    console.log(`   ${label}: no vouchers in Tally for this period`)
+    return
+  }
+
   const key = `vouchers:${fromDate}-${toDate}`
   const hash = sha256(response)
   const window = { from: ymdToIso(fromDate), to: ymdToIso(toDate) }
@@ -365,7 +374,7 @@ async function cmdPull(config, values) {
     // Only a pull that reaches today may move the cursor; a historical back-fill must not make
     // the incremental run skip the days after it.
     if (failures === 0 && toDate >= today) {
-      try { await setLastSyncDate(config.supabase, accessToken, null, undefined, runStartedAt) } catch (err) {
+      try { await setLastSyncDate(config.supabase, accessToken, null, runStartedAt.toISOString()) } catch (err) {
         console.error(`   ⚠️  ${err.message}`)
         process.exitCode = 1
       }
@@ -436,7 +445,7 @@ async function cmdIncremental(config, values) {
       saveState(state)
       try {
         // Cursor = when this run STARTED, so edits made during the run are re-read next time.
-        await setLastSyncDate(config.supabase, accessToken, null, undefined, runStartedAt)
+        await setLastSyncDate(config.supabase, accessToken, null, runStartedAt.toISOString())
       } catch (err) {
         console.error(`   ⚠️  ${err.message}`)
         process.exitCode = 1
