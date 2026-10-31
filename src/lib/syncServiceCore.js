@@ -9,18 +9,28 @@ import {
 const ENTITY_TABLES = new Set(['parties', 'ledgers', 'materials', 'vouchers'])
 const CLOUD_PAGE_SIZE = 500
 
+// View settings every device must agree on. They used to live only in each browser's IndexedDB,
+// so an admin hiding a card from the owner (or changing the layout) never reached the owner's device.
+const SHARED_SETTINGS = [
+  { key: 'owner_permissions', json: true },
+  { key: 'card_order', json: true },
+  { key: 'shop_name', json: false },
+]
+
 const CLOUD_ENTITIES = [
   {
     localTable: 'parties',
     cloudTable: 'parties',
     fields: ['name', 'type', 'uid', 'phone', 'email', 'address', 'opening_balance', 'current_balance'],
+    naturalKey: (row) => `${row.type}|${String(row.name || '').trim().toLowerCase()}`,
     normalize: normalizeCloudParty,
   },
   {
     localTable: 'ledgers',
     cloudTable: 'ledgers',
-    fields: ['name', 'group', 'opening_balance', 'current_balance', 'is_system', 'category'],
+    fields: ['name', 'group', 'primary_group', 'opening_balance', 'current_balance', 'is_system', 'category'],
     conflict: 'name',
+    naturalKey: (row) => String(row.name || '').trim().toLowerCase(),
     normalize: normalizeCloudLedger,
   },
   {
@@ -28,6 +38,7 @@ const CLOUD_ENTITIES = [
     cloudTable: 'materials',
     fields: ['sku', 'name', 'category', 'unit', 'purchase_rate', 'sales_rate', 'current_qty', 'current_value', 'reorder_threshold'],
     conflict: 'sku',
+    naturalKey: (row) => String(row.sku || '').trim().toLowerCase(),
     normalize: normalizeCloudMaterial,
   },
   {
@@ -35,6 +46,7 @@ const CLOUD_ENTITIES = [
     cloudTable: 'vouchers',
     fields: ['voucher_no', 'voucher_type', 'date', 'party_name', 'party_uid', 'amount', 'paid_amount', 'due_amount', 'payment_mode', 'items', 'ledger_entries', 'narration', 'reference_no', 'source_system', 'source_company', 'source_voucher_guid', 'source_hash'],
     conflict: 'voucher_no',
+    naturalKey: (row) => String(row.voucher_no || '').trim().toLowerCase(),
     normalize: normalizeCloudVoucher,
   },
 ]
@@ -75,10 +87,10 @@ export function createSyncService({
   database,
   isConfigured = false,
   setRemoteSnapshot = () => {},
-  dispatchUpdates = () => {
+  dispatchUpdates = (settingsChanged = true) => {
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new Event('accounting-data-updated'))
-      window.dispatchEvent(new Event('accounting-settings-updated'))
+      if (settingsChanged) window.dispatchEvent(new Event('accounting-settings-updated'))
     }
   },
   now = () => new Date(),
@@ -110,6 +122,67 @@ export function createSyncService({
       if (!Array.isArray(data)) throw new Error(`Cloud sync failed: ${tableName} returned an invalid snapshot.`)
       rows.push(...data)
       if (data.length < CLOUD_PAGE_SIZE) return rows
+    }
+  }
+
+  /** Cheap change marker the connector bumps on every commit; null if unavailable (old schema). */
+  async function readCloudVersion() {
+    try {
+      const { data, error } = await cloud.from('accounting_refresh_state').select('last_data_change_at').eq('id', 1).maybeSingle()
+      const row = Array.isArray(data) ? data[0] : data
+      return !error && row?.last_data_change_at ? String(row.last_data_change_at) : null
+    } catch {
+      return null
+    }
+  }
+
+  async function countDirtyRows() {
+    let total = 0
+    for (const entity of CLOUD_ENTITIES) {
+      total += (await database.table(entity.localTable).filter((row) => row.local_dirty).toArray()).length
+    }
+    return total
+  }
+
+  async function pullSharedSettings(role) {
+    try {
+      const { data, error } = await cloud.from('app_settings').select('key,value')
+      if (error || !Array.isArray(data)) return false
+      const byKey = new Map(data.map((row) => [row.key, row.value]))
+      let changed = false
+      for (const { key, json } of SHARED_SETTINGS) {
+        const local = await database.settings.get(key)
+        if (!byKey.has(key)) {
+          // First run after the migration: the admin's local choice seeds the cloud.
+          if (role === 'admin' && local?.value != null) await pushSharedSetting(key, local.value)
+          continue
+        }
+        // The admin device is the author; only non-admin devices follow the cloud.
+        if (role === 'admin') continue
+        const value = json ? JSON.stringify(byKey.get(key)) : String(byKey.get(key) ?? '')
+        if (local?.value !== value) { await database.settings.put({ key, value }); changed = true }
+      }
+      return changed
+    } catch (error) {
+      logError('Shared settings sync skipped:', error)
+      return false
+    }
+  }
+
+  async function pushSharedSetting(key, rawValue) {
+    const spec = SHARED_SETTINGS.find((item) => item.key === key)
+    if (!spec || !isConfigured) return false
+    try {
+      const { data: { user } = {} } = await cloud.auth.getUser()
+      let value = rawValue
+      if (spec.json) value = typeof rawValue === 'string' ? JSON.parse(rawValue) : rawValue
+      const { error } = await cloud.from('app_settings')
+        .upsert({ key, value, updated_at: now().toISOString(), updated_by: user?.id ?? null }, { onConflict: 'key' })
+      if (error) throw new Error(error.message)
+      return true
+    } catch (error) {
+      logError(`Could not publish shared setting ${key}:`, error)
+      return false
     }
   }
 
@@ -152,9 +225,9 @@ export function createSyncService({
 
     if (!['admin', 'owner'].includes(currentRole)) {
       if (dirtyCount > 0) {
-        return { pushed: [], pushedCount: 0, skipped: dirtyCount, reason: 'role_not_permitted', deleted: [], pendingDeletes }
+        return { pushed: [], pushedCount: 0, skipped: dirtyCount, reason: 'role_not_permitted', deleted: [], pendingDeletes, role: currentRole }
       }
-      return { pushed: [], pushedCount: 0, skipped: 0, deleted: [], pendingDeletes }
+      return { pushed: [], pushedCount: 0, skipped: 0, deleted: [], pendingDeletes, role: currentRole }
     }
 
     for (const item of pendingDeletes) {
@@ -233,10 +306,10 @@ export function createSyncService({
       }
     }
 
-    return { pushed, deleted: pendingDeletes, pendingDeletes }
+    return { pushed, deleted: pendingDeletes, pendingDeletes, role: currentRole }
   }
 
-  async function performCloudSync() {
+  async function performCloudSync({ onlyIfChanged = false } = {}) {
     if (!isConfigured) return { success: false, error: 'Supabase URL/Key is not configured.' }
 
     try {
@@ -245,9 +318,20 @@ export function createSyncService({
         return { success: false, error: 'Not authenticated with Supabase. Please sign in.' }
       }
 
+      // Read the change marker BEFORE the snapshot: anything committed while we read bumps it
+      // again, so the next poll sees a newer value and re-syncs instead of missing the change.
+      const cloudVersion = await readCloudVersion()
+      if (onlyIfChanged && cloudVersion) {
+        const known = (await database.settings.get('cloud_data_version'))?.value
+        if (known === cloudVersion && (await countDirtyRows()) === 0) {
+          return { success: true, skipped: true, lastSync: (await database.settings.get('last_cloud_sync'))?.value }
+        }
+      }
+
       // Read and validate every cloud table before changing local state or pushing edits.
       const [parties, ledgers, materials, vouchers] = await readCloudSnapshot()
       const pushResult = await pushLocalChanges(user.id)
+      const role = pushResult.role
       const pushed = Array.isArray(pushResult.pushed) ? pushResult.pushed : []
       const deleted = Array.isArray(pushResult.deleted) ? pushResult.deleted : []
       const pendingDeletes = Array.isArray(pushResult.pendingDeletes) ? pushResult.pendingDeletes : []
@@ -289,6 +373,7 @@ export function createSyncService({
               entity.normalize,
               suppressedIds.get(entity.cloudTable),
               remoteDeletedIds.get(entity.cloudTable),
+              entity.naturalKey,
             )
             return Promise.all([
               plan.upserts.length ? table.bulkPut(plan.upserts) : Promise.resolve(),
@@ -304,10 +389,12 @@ export function createSyncService({
         await database.settings.put({ key: 'pending_cloud_deletes', value: '[]' })
       }
 
+      const settingsChanged = await pullSharedSettings(role)
+      if (cloudVersion) await database.settings.put({ key: 'cloud_data_version', value: cloudVersion })
       const nowIso = now().toISOString()
       await database.settings.put({ key: 'last_cloud_sync', value: nowIso })
       await database.settings.put({ key: 'cloud_sync_status', value: 'synced' })
-      dispatchUpdates()
+      dispatchUpdates(settingsChanged)
 
       return {
         success: true,
@@ -328,16 +415,19 @@ export function createSyncService({
     }
   }
 
-  async function syncFromSupabase() {
+  async function syncFromSupabase(options = {}) {
     if (activeSync) {
-      syncRequestedWhileActive = true
+      syncRequestedWhileActive = !options.onlyIfChanged || syncRequestedWhileActive
       return activeSync
     }
 
     let result
+    let first = true
     do {
       syncRequestedWhileActive = false
-      const currentSync = performCloudSync()
+      // A follow-up pass requested during a run is always a full sync.
+      const currentSync = performCloudSync(first ? options : {})
+      first = false
       activeSync = currentSync
       try {
         result = await currentSync

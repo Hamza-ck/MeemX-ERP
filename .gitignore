@@ -26,6 +26,10 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+connector/.sync-state.json
+connector/.sync.lock
+connector/sync-task.log
+
 
 .vercel
 .env*

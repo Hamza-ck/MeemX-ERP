@@ -13,17 +13,32 @@ export function buildEntitySnapshot(
   normalize,
   suppressedCloudIds = new Set(),
   remoteDeletedIds = new Set(),
+  naturalKey = null,
 ) {
   const localByCloudId = new Map()
   for (const row of localRows) {
     if (row.cloud_id) localByCloudId.set(row.cloud_id, row)
+  }
+  // A clean local row that was created before it was ever synced (e.g. from an earlier Excel
+  // import) is the same record as the cloud row with the same natural key. Adopt it instead of
+  // inserting a duplicate next to it.
+  const adoptableByKey = new Map()
+  if (naturalKey) {
+    for (const row of localRows) {
+      if (!row.cloud_id && !row.local_dirty) adoptableByKey.set(naturalKey(row), row)
+    }
   }
 
   const activeCloudRows = cloudRows.filter((row) => row?.id && !row.deleted_at)
   const upserts = []
   for (const [index, cloudRow] of activeCloudRows.entries()) {
     if (!cloudRow?.id || suppressedCloudIds.has(cloudRow.id)) continue
-    const localRow = localByCloudId.get(cloudRow.id)
+    let localRow = localByCloudId.get(cloudRow.id)
+    if (!localRow && naturalKey) {
+      const key = naturalKey(cloudRow)
+      localRow = adoptableByKey.get(key)
+      if (localRow) adoptableByKey.delete(key)
+    }
     if (localRow?.local_dirty) continue
     upserts.push({
       ...normalize(cloudRow, index),
@@ -49,14 +64,13 @@ export const normalizeCloudParty = (party) => ({
   address: party.address || '',
   opening_balance: Number(party.opening_balance || 0),
   current_balance: Number(party.current_balance || 0),
-  age_bucket: party.age_bucket || '0–30d',
-  next_payment: party.next_payment || '',
-  due_days: Number(party.due_days || 15),
+  // age_bucket / due_days are NOT cloud columns. Ageing is computed from invoice dates
+  // (computeDebtorAging); hardcoding '0–30d' here made every synced debtor look current.
 })
 
 export const normalizeCloudLedger = (ledger) => {
   const group = ledger.group || 'General'
-  const categoryFromGroup = tallyLedgerCategory(group)
+  const categoryFromGroup = tallyLedgerCategory(ledger.primary_group || group)
   const category = ledger.category && !(ledger.category === 'asset' && categoryFromGroup !== 'asset')
     ? ledger.category
     : categoryFromGroup
@@ -64,6 +78,7 @@ export const normalizeCloudLedger = (ledger) => {
   return {
     name: ledger.name || '',
     group,
+    primary_group: ledger.primary_group || '',
     opening_balance: Number(ledger.opening_balance || 0),
     current_balance: Number(ledger.current_balance || 0),
     category,

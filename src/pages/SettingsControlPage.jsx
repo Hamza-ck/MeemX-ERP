@@ -12,6 +12,7 @@ import { useAuth } from '../context/AuthContext'
 import { accDb } from '../lib/accountingDb'
 import Nav from '../components/Nav'
 import AddUserModal from '../components/AddUserModal'
+import AccountRolesCard from '../components/AccountRolesCard'
 
 export default function SettingsControlPage() {
   const {
@@ -360,6 +361,8 @@ export default function SettingsControlPage() {
                 </div>
               </div>
             </section>
+
+            <AccountRolesCard />
 
             {/* Users and Access (PDF Page 14) */}
             <section

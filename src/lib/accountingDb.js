@@ -129,13 +129,30 @@ export async function resolvePartyUidOnSale(partyName, dueAmount, phone = '', da
     email: '',
     address: '',
     opening_balance: 0,
-    current_balance: Number(dueAmount) || 0,
+    // 0, not dueAmount: applyVoucherEffects adds the invoice's due amount to the party right
+    // after this. Seeding it here as well doubled the first credit sale to every new customer.
+    current_balance: 0,
     age_bucket: '0–30d',
     created_at: new Date().toISOString(),
   })
 
   const createdParty = await database.parties.get(newPartyId)
   return { party: createdParty, uid: assignedUid }
+}
+
+const BANK_MODE = /bank|hdfc|sbi|icici|axis|kotak|neft|rtgs|imps|upi|cheque|card|online|gpay|phonepe|paytm/i
+
+/**
+ * Pick the cash/bank ledger a payment mode refers to. A ledger named exactly like the mode wins
+ * ("SBI" → the SBI ledger); otherwise the first ledger of the right kind. Every function used to
+ * pick the first bank ledger regardless of the mode, and each had a different idea of what "bank" meant.
+ */
+export async function findCashBankLedger(database, paymentMode) {
+  const mode = String(paymentMode || 'Cash').trim()
+  const isBank = BANK_MODE.test(mode)
+  const named = await database.ledgers.where('name').equalsIgnoreCase(mode).first()
+  if (named && ['Bank Accounts', 'Cash-in-hand'].includes(named.group)) return named
+  return (await database.ledgers.where('group').equals(isBank ? 'Bank Accounts' : 'Cash-in-hand').first()) || null
 }
 
 /**
@@ -168,13 +185,15 @@ async function applyVoucherEffects(voucher, isReversal = false, database = accDb
 
       if (material) {
         let qtyChange = 0
-        if (voucher.voucher_type === 'sales') {
+        if (voucher.voucher_type === 'sales' || voucher.voucher_type === 'debit_note') {
           qtyChange = -itemQty * multiplier
-        } else if (voucher.voucher_type === 'purchase') {
+        } else if (voucher.voucher_type === 'purchase' || voucher.voucher_type === 'credit_note') {
           qtyChange = itemQty * multiplier
         }
 
-        const newQty = Math.max(0, (Number(material.current_qty) || 0) + qtyChange)
+        // No clamp at 0: Tally allows negative stock, and clamping makes a later reversal
+        // (delete/edit) add back more than was ever removed, inflating stock.
+        const newQty = (Number(material.current_qty) || 0) + qtyChange
         const stockChanges = { current_qty: newQty }
         if (material.current_value != null) {
           stockChanges.current_value = newQty * (Number(material.purchase_rate) || 0)
@@ -198,28 +217,28 @@ async function applyVoucherEffects(voucher, isReversal = false, database = accDb
       if (party.type === 'debtor') {
         if (voucher.voucher_type === 'sales') {
           balanceChange = dueAmount * multiplier
+        } else if (voucher.voucher_type === 'credit_note') {
+          balanceChange = -(dueAmount || amount) * multiplier
         } else if (voucher.voucher_type === 'receipt') {
           balanceChange = -amount * multiplier
         }
       } else if (party.type === 'creditor') {
         if (voucher.voucher_type === 'purchase') {
           balanceChange = dueAmount * multiplier
+        } else if (voucher.voucher_type === 'debit_note') {
+          balanceChange = -(dueAmount || amount) * multiplier
         } else if (voucher.voucher_type === 'payment') {
           balanceChange = -amount * multiplier
         }
       }
 
-      const newBalance = Math.max(0, (Number(party.current_balance) || 0) + balanceChange)
+      const newBalance = (Number(party.current_balance) || 0) + balanceChange
       await database.parties.update(party.id, { current_balance: newBalance })
     }
   }
 
   // 3. Cash & Bank Ledgers
-  const paymentMode = voucher.payment_mode || 'Cash'
-  const isBank = paymentMode.toLowerCase().includes('bank') || paymentMode.toLowerCase().includes('hdfc') || paymentMode.toLowerCase().includes('neft')
-  const ledgerGroup = isBank ? 'Bank Accounts' : 'Cash-in-hand'
-
-  let targetLedger = await database.ledgers.where('group').equals(ledgerGroup).first()
+  const targetLedger = await findCashBankLedger(database, voucher.payment_mode)
   if (targetLedger) {
     let cashChange = 0
     if (voucher.voucher_type === 'sales') {
@@ -230,6 +249,10 @@ async function applyVoucherEffects(voucher, isReversal = false, database = accDb
       cashChange = amount * multiplier
     } else if (voucher.voucher_type === 'payment') {
       cashChange = -amount * multiplier
+    } else if (voucher.voucher_type === 'credit_note') {
+      cashChange = -paidAmount * multiplier
+    } else if (voucher.voucher_type === 'debit_note') {
+      cashChange = paidAmount * multiplier
     } else if (voucher.voucher_type === 'contra') {
       cashChange = 0
     }
@@ -389,7 +412,7 @@ export async function recordSupplierPayment({
     }
 
     if (supplier) {
-      const newBal = Math.max(0, (Number(supplier.current_balance) || 0) - payAmt)
+      const newBal = (Number(supplier.current_balance) || 0) - payAmt
       await accDb.parties.update(supplier.id, { current_balance: newBal })
     }
 
@@ -410,11 +433,9 @@ export async function recordSupplierPayment({
     }
     await accDb.vouchers.add(voucher)
 
-    const isBank = paymentMode.toLowerCase().includes('bank') || paymentMode.toLowerCase().includes('hdfc') || paymentMode.toLowerCase().includes('upi')
-    const groupName = isBank ? 'Bank Accounts' : 'Cash-in-hand'
-    const ledger = await accDb.ledgers.where('group').equals(groupName).first()
+    const ledger = await findCashBankLedger(accDb, paymentMode)
     if (ledger) {
-      const newLedgerBal = Math.max(0, (Number(ledger.current_balance) || 0) - payAmt)
+      const newLedgerBal = (Number(ledger.current_balance) || 0) - payAmt
       await accDb.ledgers.update(ledger.id, { current_balance: newLedgerBal })
     }
 
@@ -474,7 +495,7 @@ export async function recordDebtorReceipt({
     }
 
     if (debtor) {
-      const newBal = Math.max(0, (Number(debtor.current_balance) || 0) - recAmt)
+      const newBal = (Number(debtor.current_balance) || 0) - recAmt
       const newBucket = newBal <= 0 ? 'Settled' : debtor.age_bucket
       await accDb.parties.update(debtor.id, { current_balance: newBal, age_bucket: newBucket })
     }
@@ -497,9 +518,7 @@ export async function recordDebtorReceipt({
     }
     await accDb.vouchers.add(voucher)
 
-    const isBank = paymentMode.toLowerCase().includes('bank') || paymentMode.toLowerCase().includes('hdfc') || paymentMode.toLowerCase().includes('upi')
-    const groupName = isBank ? 'Bank Accounts' : 'Cash-in-hand'
-    const ledger = await accDb.ledgers.where('group').equals(groupName).first()
+    const ledger = await findCashBankLedger(accDb, paymentMode)
     if (ledger) {
       const newLedgerBal = (Number(ledger.current_balance) || 0) + recAmt
       await accDb.ledgers.update(ledger.id, { current_balance: newLedgerBal })
@@ -594,11 +613,9 @@ export async function recordExpenseVoucher({
     }
     await accDb.vouchers.add(voucher)
 
-    const isBank = paymentMode.toLowerCase().includes('bank') || paymentMode.toLowerCase().includes('hdfc') || paymentMode.toLowerCase().includes('upi')
-    const groupName = isBank ? 'Bank Accounts' : 'Cash-in-hand'
-    const ledger = await accDb.ledgers.where('group').equals(groupName).first()
+    const ledger = await findCashBankLedger(accDb, paymentMode)
     if (ledger) {
-      const newLedgerBal = Math.max(0, (Number(ledger.current_balance) || 0) - expAmt)
+      const newLedgerBal = (Number(ledger.current_balance) || 0) - expAmt
       await accDb.ledgers.update(ledger.id, { current_balance: newLedgerBal })
     }
 

@@ -5,33 +5,42 @@ import {
   FileSpreadsheet,
   Edit3,
   TrendingDown,
+  TrendingUp,
 } from 'lucide-react'
 import Nav from '../components/Nav'
+import { useAuth } from '../context/AuthContext'
 import { accDb } from '../lib/accountingDb'
+import { calculateExpenseBreakdown } from '../lib/dashboardMetrics'
 import AdminEditModal from '../components/AdminEditModal'
 
 export default function ExpensesPage() {
+  const { isAdmin } = useAuth()
   const navigate = useNavigate()
-  const [categories, setCategories] = useState([])
+  const [breakdown, setBreakdown] = useState({
+    categories: [],
+    totalThisMonth: 0,
+    totalPrevPeriod: 0,
+    pctChange: null,
+    comparisonLabel: 'No prior-month data for comparison',
+  })
   const [editingExpense, setEditingExpense] = useState(null)
 
-  // Load expenses from Dexie ledgers/vouchers
+  // Load period-based expenses from Dexie vouchers & expense ledgers
   const loadExpenses = useCallback(async () => {
     try {
-      const expLedgers = await accDb.ledgers.where('category').equals('expense').toArray()
-      if (expLedgers && expLedgers.length > 0) {
-        setCategories(
-          expLedgers.map((l) => ({
-            id: l.id,
-            name: l.name,
-            rawAmount: Number(l.current_balance) || 0,
-          }))
-        )
-      } else {
-        setCategories([])
-      }
+      const [vouchers, ledgers] = await Promise.all([
+        accDb.vouchers.toArray(),
+        accDb.ledgers.toArray(),
+      ])
+      setBreakdown(calculateExpenseBreakdown(vouchers, ledgers))
     } catch {
-      setCategories([])
+      setBreakdown({
+        categories: [],
+        totalThisMonth: 0,
+        totalPrevPeriod: 0,
+        pctChange: null,
+        comparisonLabel: 'No prior-month data for comparison',
+      })
     }
   }, [])
 
@@ -42,19 +51,17 @@ export default function ExpensesPage() {
     return () => window.removeEventListener('accounting-data-updated', onUpdate)
   }, [loadExpenses])
 
-  // Total monthly expenses
-  const totalExpenses = useMemo(() => {
-    return categories.reduce((sum, c) => sum + (Number(c.rawAmount) || 0), 0)
-  }, [categories])
+  const { categories, totalThisMonth: totalExpenses, pctChange, comparisonLabel } = breakdown
 
   const maxExpense = useMemo(() => {
-    return Math.max(...categories.map((c) => Number(c.rawAmount) || 0), 120000)
+    return Math.max(...categories.map((c) => Number(c.rawAmount) || 0), 1)
   }, [categories])
 
   const formatAmount = (amt) => {
-    if (amt >= 100000) return `₹${(amt / 100000).toFixed(1)}L`
-    if (amt >= 1000) return `₹${(amt / 1000).toFixed(0)}K`
-    return `₹${amt}`
+    const num = Number(amt) || 0
+    if (num >= 100000) return `₹${(num / 100000).toFixed(1)}L`
+    if (num >= 1000) return `₹${(num / 1000).toFixed(1)}K`
+    return `₹${num}`
   }
 
   return (
@@ -78,15 +85,17 @@ export default function ExpensesPage() {
             </h1>
           </div>
 
-          <button
-            type="button"
-            onClick={() => navigate('/tally')}
-            className="flex items-center gap-1.5 rounded-2xl bg-[#0e655d] px-3.5 py-2 text-xs font-extrabold text-white shadow-xs hover:bg-[#0a4f49] transition active:scale-95"
-            title="Import vouchers from Tally XML"
-          >
-            <FileSpreadsheet size={16} />
-            <span>Tally import</span>
-          </button>
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={() => navigate('/tally')}
+              className="flex items-center gap-1.5 rounded-2xl bg-[#0e655d] px-3.5 py-2 text-xs font-extrabold text-white shadow-xs hover:bg-[#0a4f49] transition active:scale-95"
+              title="Import vouchers from Tally XML"
+            >
+              <FileSpreadsheet size={16} />
+              <span>Tally import</span>
+            </button>
+          )}
         </header>
 
         {/* Featured This Month Card (PDF Page 8) */}
@@ -95,15 +104,24 @@ export default function ExpensesPage() {
           <strong className="mt-1 block text-[38px] font-extrabold tracking-tight text-[#c25e19]">
             {formatAmount(totalExpenses)}
           </strong>
-          <span className="mt-1 inline-flex items-center gap-1 text-xs font-bold text-[#147366]">
-            <TrendingDown size={14} /> 4% vs last month
+          <span
+            className={`mt-1 inline-flex items-center gap-1 text-xs font-bold ${
+              pctChange == null
+                ? 'text-[#6a847c]'
+                : pctChange > 0
+                ? 'text-[#c25e19]'
+                : 'text-[#147366]'
+            }`}
+          >
+            {pctChange != null && (pctChange > 0 ? <TrendingUp size={14} /> : <TrendingDown size={14} />)}
+            {comparisonLabel}
           </span>
         </div>
 
         {/* By Category Section (PDF Page 8) */}
         <section className="rounded-3xl border border-[#e1e9e3] bg-white p-6 shadow-xs">
           <h2 className="text-[17px] font-extrabold text-[#11382f] mb-4">
-            By category
+            By category (this month)
           </h2>
 
           <div className="space-y-5">
@@ -118,15 +136,17 @@ export default function ExpensesPage() {
                     <div className="flex items-center justify-between text-sm font-extrabold text-[#11382f] mb-1.5">
                       <div className="flex items-center gap-2">
                         <span>{cat.name}</span>
-                        <button
-                          type="button"
-                          onClick={() => setEditingExpense({ id: cat.id, name: cat.name, current_balance: amt, category: 'expense' })}
-                          className="opacity-75 group-hover:opacity-100 inline-flex items-center gap-1 rounded-md border border-[#cfded6] bg-[#f8faf9] px-2 py-0.5 text-[10px] font-bold text-[#0e655d] hover:bg-[#ebf3ef] transition"
-                          title="Admin Edit expense"
-                        >
-                          <Edit3 size={11} />
-                          <span>Edit</span>
-                        </button>
+                        {isAdmin && typeof cat.id === 'number' && (
+                          <button
+                            type="button"
+                            onClick={() => setEditingExpense({ id: cat.id, name: cat.name, current_balance: amt, category: 'expense' })}
+                            className="opacity-75 group-hover:opacity-100 inline-flex items-center gap-1 rounded-md border border-[#cfded6] bg-[#f8faf9] px-2 py-0.5 text-[10px] font-bold text-[#0e655d] hover:bg-[#ebf3ef] transition"
+                            title="Admin Edit expense"
+                          >
+                            <Edit3 size={11} />
+                            <span>Edit</span>
+                          </button>
+                        )}
                       </div>
                       <span>{formatAmount(amt)}</span>
                     </div>
@@ -141,9 +161,9 @@ export default function ExpensesPage() {
               })
             ) : (
               <div className="py-6 text-center">
-                <p className="text-sm font-bold text-[#11382f]">No expenses recorded</p>
+                <p className="text-sm font-bold text-[#11382f]">No expenses recorded this month</p>
                 <p className="text-xs text-[#6e8a81] mt-1">
-                  Import Tally Payment vouchers or expense ledgers to populate categories.
+                  Import Tally Payment or Journal vouchers for expense ledgers to populate categories.
                 </p>
               </div>
             )}

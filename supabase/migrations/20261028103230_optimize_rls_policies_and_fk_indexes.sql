@@ -2,6 +2,9 @@
 -- Split broad ALL policies so they do not overlap their SELECT policies.
 drop policy if exists "Profiles: Admin manages profiles" on public.profiles;
 drop policy if exists "Profiles: user reads self or Admin reads all" on public.profiles;
+drop policy if exists "Profiles: Admin inserts profiles" on public.profiles;
+drop policy if exists "Profiles: Admin updates profiles" on public.profiles;
+drop policy if exists "Profiles: Admin deletes profiles" on public.profiles;
 create policy "Profiles: user reads self or Admin reads all" on public.profiles
   for select to authenticated using (id = (select auth.uid()) or (select public.is_admin()));
 create policy "Profiles: Admin inserts profiles" on public.profiles
@@ -64,9 +67,12 @@ create policy "Admin deletes vouchers" on public.vouchers
   for delete to authenticated using ((select public.is_admin()));
 
 drop policy if exists "Authenticated users read app settings" on public.app_settings;
+drop policy if exists "Admin manages app settings" on public.app_settings;
+drop policy if exists "Admin inserts app settings" on public.app_settings;
+drop policy if exists "Admin updates app settings" on public.app_settings;
+drop policy if exists "Admin deletes app settings" on public.app_settings;
 create policy "Authenticated users read app settings" on public.app_settings
   for select to authenticated using ((select auth.uid()) is not null);
-drop policy if exists "Admin manages app settings" on public.app_settings;
 create policy "Admin inserts app settings" on public.app_settings
   for insert to authenticated with check ((select public.is_admin()));
 create policy "Admin updates app settings" on public.app_settings
@@ -75,9 +81,11 @@ create policy "Admin deletes app settings" on public.app_settings
   for delete to authenticated using ((select public.is_admin()));
 
 drop policy if exists "Authenticated users read accounting refresh state" on public.accounting_refresh_state;
+drop policy if exists "Admin updates accounting refresh state" on public.accounting_refresh_state;
+drop policy if exists "Admin inserts accounting refresh state" on public.accounting_refresh_state;
+drop policy if exists "Admin deletes accounting refresh state" on public.accounting_refresh_state;
 create policy "Authenticated users read accounting refresh state" on public.accounting_refresh_state
   for select to authenticated using ((select auth.uid()) is not null);
-drop policy if exists "Admin updates accounting refresh state" on public.accounting_refresh_state;
 create policy "Admin inserts accounting refresh state" on public.accounting_refresh_state
   for insert to authenticated with check ((select public.is_admin()));
 create policy "Admin updates accounting refresh state" on public.accounting_refresh_state

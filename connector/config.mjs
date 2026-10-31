@@ -67,6 +67,16 @@ export function redactUrl(raw) {
   }
 }
 
+/** Strip scheme/path/port from a host string, keeping IPv6 literals intact. */
+export function parseHost(raw) {
+  let host = String(raw).trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '')
+  const bracketed = host.match(/^\[([^\]]+)\](?::\d+)?$/)
+  if (bracketed) return bracketed[1]
+  // A bare IPv6 address contains several colons; host:port contains exactly one.
+  if ((host.match(/:/g) || []).length === 1) host = host.split(':')[0]
+  return host
+}
+
 /**
  * Build and validate configuration.
  *
@@ -81,16 +91,13 @@ export function loadConfig(cliFlags = {}, envOverride = null) {
 
   // 2. Merge: CLI > process environment > connector .env > root .env
   const env = envOverride || process.env
-  const get = (key) => cliFlags[key] ?? env[key] ?? dotEnv[key] ?? rootEnv[key] ?? ''
+  // Empty strings count as "unset" so an empty process variable cannot shadow connector/.env.
+  const get = (key) => [cliFlags[key], env[key], dotEnv[key], rootEnv[key]].find((v) => v !== undefined && v !== null && v !== '') ?? ''
 
-  let host = get('TALLY_HOST') || '127.0.0.1'
-  host = host.replace(/^https?:\/\//i, '').replace(/\/.*$/, '').trim()
-  if (host.includes(':') && !host.startsWith('[')) {
-    const parts = host.split(':')
-    host = parts[0]
-  }
-  const port = parseInt(get('TALLY_PORT') || '9000', 10)
-  const company = get('TALLY_COMPANY')
+  const host = parseHost(get('TALLY_HOST') || '127.0.0.1')
+  const portRaw = get('TALLY_PORT') || '9000'
+  const port = Number(portRaw)
+  const company = get('TALLY_COMPANY').trim()
   const allowRemote = !!cliFlags.allowRemote
 
   const supabaseUrl = get('SUPABASE_URL') || get('VITE_SUPABASE_URL')
@@ -101,6 +108,10 @@ export function loadConfig(cliFlags = {}, envOverride = null) {
 
   // --- Validation ---
   const errors = []
+  if (!Number.isInteger(port) || port < 1 || port > 65535) errors.push(`TALLY_PORT="${portRaw}" is not a valid port.`)
+  // Without an explicit company Tally answers for whichever company is open on screen,
+  // which silently syncs the wrong books when someone switches company.
+  if (!company) errors.push('TALLY_COMPANY is required (the company name exactly as shown in Tally).')
 
   // Loopback check
   if (!LOOPBACK.has(host.toLowerCase()) && !allowRemote) {

@@ -49,16 +49,17 @@ serve(async (req: Request) => {
       )
     }
 
-    // Verify caller role is owner from profiles table
+    // Only administrators manage accounts. (This used to demand role = 'owner', but owners are
+    // read-only and cannot reach the user screen, so nobody could ever create a user.)
     const { data: callerProfile, error: profileError } = await callerClient
       .from('profiles')
       .select('role')
       .eq('id', callerUser.id)
-      .single()
+      .maybeSingle()
 
-    if (profileError || callerProfile?.role !== 'owner') {
+    if (profileError || callerProfile?.role !== 'admin') {
       return new Response(
-        JSON.stringify({ error: 'Unauthorized: Only an owner can create new users' }),
+        JSON.stringify({ error: 'Unauthorized: Only an administrator can create new users' }),
         { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
@@ -81,7 +82,16 @@ serve(async (req: Request) => {
       )
     }
 
-    const assignedRole = role === 'owner' ? 'owner' : 'employee'
+    // Honour the requested role (admin | owner | employee). It used to collapse everything that
+    // was not 'owner' into 'employee', so an Admin could never be created. Unknown values are
+    // rejected rather than guessed, and the safe default is read-only.
+    if (role !== undefined && !['admin', 'owner', 'employee'].includes(role)) {
+      return new Response(
+        JSON.stringify({ error: 'Role must be admin, owner or employee' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+    const assignedRole = role ?? 'owner'
 
     // 3. Admin client with elevated service role
     const adminClient = createClient(supabaseUrl, supabaseServiceKey, {
@@ -119,8 +129,10 @@ serve(async (req: Request) => {
     })
 
     if (upsertError) {
+      // Do not leave a login without a profile behind: it could never sign in and blocks the email.
+      await adminClient.auth.admin.deleteUser(createdUserId)
       return new Response(
-        JSON.stringify({ error: `User created, but profile update failed: ${upsertError.message}` }),
+        JSON.stringify({ error: `Could not create the profile, so the account was rolled back: ${upsertError.message}` }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }

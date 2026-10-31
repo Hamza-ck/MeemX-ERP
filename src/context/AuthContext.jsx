@@ -1,9 +1,47 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react'
-import { accDb, initDefaultAccountingData } from '../lib/accountingDb'
+import { accDb, initDefaultAccountingData, setApplyingRemoteSnapshot } from '../lib/accountingDb'
 import { supabase, supabaseConfigured } from '../lib/supabaseClient'
-import { syncFromSupabase } from '../lib/syncService'
+import { syncFromSupabase, pushSharedSetting } from '../lib/syncService'
 
 const AuthContext = createContext(null)
+
+const ROLES = ['admin', 'owner', 'employee']
+const LOCAL_TABLES = ['vouchers', 'materials', 'parties', 'ledgers']
+
+/**
+ * IndexedDB belongs to the browser, not the account. Without this, signing in as a different
+ * user on the same browser showed the previous user's books (including data the new role
+ * should not see) and let an admin push someone else's half-synced edits.
+ * Unsynced edits are never silently destroyed: they are kept for an incoming admin, and
+ * otherwise saved to a backup setting before the tables are cleared.
+ */
+async function isolateLocalDataForUser(userId, role) {
+  const previous = localStorage.getItem('tallyflow_last_user_id')
+  localStorage.setItem('tallyflow_last_user_id', userId)
+  if (!previous || previous === userId) return
+
+  const backup = {}
+  setApplyingRemoteSnapshot(true)
+  try {
+    await accDb.transaction('rw', [...LOCAL_TABLES.map((name) => accDb.table(name)), accDb.settings], async () => {
+      for (const name of LOCAL_TABLES) {
+        const table = accDb.table(name)
+        const dirty = (await table.toArray()).filter((row) => row.local_dirty)
+        if (dirty.length) backup[name] = dirty
+        await table.clear()
+        if (role === 'admin' && dirty.length) await table.bulkAdd(dirty)
+      }
+      await accDb.settings.bulkDelete(role === 'admin'
+        ? ['cloud_data_version', 'last_cloud_sync']
+        : ['cloud_data_version', 'last_cloud_sync', 'pending_cloud_deletes'])
+      if (role !== 'admin' && Object.keys(backup).length) {
+        await accDb.settings.put({ key: `unsynced_backup_${Date.now()}`, value: JSON.stringify(backup) })
+      }
+    })
+  } finally {
+    setApplyingRemoteSnapshot(false)
+  }
+}
 
 const DEFAULT_USERS = []
 
@@ -206,6 +244,7 @@ export function AuthProvider({ children }) {
       return false
     }
 
+    await isolateLocalDataForUser(session.user.id, resolvedProfile.role)
     setSessionUser(session.user)
     setCurrentRole(resolvedProfile.role)
     setActiveUserName(resolvedProfile.full_name || session.user.email || '')
@@ -269,11 +308,13 @@ export function AuthProvider({ children }) {
     }
   }, [])
 
-  const syncCloudNow = useCallback(async () => {
-    setCloudSyncStatus('syncing')
-    setCloudSyncError('')
+  const syncCloudNow = useCallback(async (options = {}) => {
+    // Background polls must not flash "Syncing…" when there is nothing new.
+    if (!options.onlyIfChanged) setCloudSyncStatus('syncing')
     try {
-      const result = await syncFromSupabase()
+      const result = await syncFromSupabase(options)
+      if (result.skipped) return result
+      setCloudSyncError('')
       if (!result.success) {
         setCloudSyncStatus('error')
         setCloudSyncError(result.error || 'Cloud sync failed.')
@@ -305,6 +346,24 @@ export function AuthProvider({ children }) {
 
   const sessionUserId = sessionUser?.id
 
+  // Re-read the account's role from the database so a promotion/demotion applies to an open
+  // session. Before, the role was read once at sign-in, so the view stayed wrong until re-login.
+  const refreshRole = useCallback(async () => {
+    if (!sessionUserId || !supabaseConfigured) return
+    const { data: profile, error } = await supabase
+      .from('profiles').select('role, full_name').eq('id', sessionUserId).maybeSingle()
+    if (error) return                                    // offline/transient: keep what we have
+    if (!profile || !ROLES.includes(profile.role)) {     // account removed or role revoked
+      localStorage.removeItem('tallyflow_verified_profile')
+      await supabase.auth.signOut()
+      clearAccountSession()
+      return
+    }
+    setCurrentRole((previous) => (previous === profile.role ? previous : profile.role))
+    if (profile.full_name) setActiveUserName(profile.full_name)
+    localStorage.setItem('tallyflow_verified_profile', JSON.stringify({ id: sessionUserId, role: profile.role, full_name: profile.full_name || '' }))
+  }, [sessionUserId])
+
   // Real-time role propagation (Step 5)
   useEffect(() => {
     if (!sessionUserId) return
@@ -331,21 +390,53 @@ export function AuthProvider({ children }) {
     }, 0)
 
     const onLocalDataChanged = () => {
-      if (!['admin', 'owner'].includes(currentRole)) return
+      if (currentRole !== 'admin') return
       if (debounceTimer) clearTimeout(debounceTimer)
       debounceTimer = setTimeout(() => {
         if (active) syncCloudNow()
       }, 600)
     }
 
+    // Live data: the Tally connector writes to Supabase every few minutes, but the browser used to
+    // read the cloud once at login. Poll a tiny change marker, refresh when the tab regains focus
+    // or the network returns, and listen for the connector's commit in realtime.
+    const refreshIfVisible = () => {
+      if (!active || document.visibilityState === 'hidden' || navigator.onLine === false) return
+      refreshRole()
+      syncCloudNow({ onlyIfChanged: true })
+    }
+    const pollTimer = setInterval(refreshIfVisible, 45_000)
+    document.addEventListener('visibilitychange', refreshIfVisible)
+    window.addEventListener('online', refreshIfVisible)
     window.addEventListener('accounting-local-data-changed', onLocalDataChanged)
+
+    let channel = null
+    if (supabaseConfigured) {
+      try {
+        channel = supabase.channel('accounting-refresh')
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'accounting_refresh_state' }, () => {
+            if (active) syncCloudNow({ onlyIfChanged: true })
+          })
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles', filter: `id=eq.${sessionUserId}` }, () => {
+            if (active) refreshRole()
+          })
+          .subscribe()
+      } catch (error) {
+        console.warn('Realtime refresh unavailable; falling back to polling.', error)
+      }
+    }
+
     return () => {
       active = false
       clearTimeout(initialSyncTimer)
+      clearInterval(pollTimer)
       if (debounceTimer) clearTimeout(debounceTimer)
+      document.removeEventListener('visibilitychange', refreshIfVisible)
+      window.removeEventListener('online', refreshIfVisible)
       window.removeEventListener('accounting-local-data-changed', onLocalDataChanged)
+      if (channel) supabase.removeChannel(channel)
     }
-  }, [sessionUserId, isPinUnlocked, currentRole, syncCloudNow])
+  }, [sessionUserId, isPinUnlocked, currentRole, syncCloudNow, refreshRole])
 
   const signIn = async (email, password) => {
     if (!supabaseConfigured) {
@@ -400,19 +491,24 @@ export function AuthProvider({ children }) {
   const updateOwnerPermission = async (key, val) => {
     const updated = { ...ownerPermissions, [key]: val }
     setOwnerPermissions(updated)
-    await accDb.settings.put({ key: 'owner_permissions', value: JSON.stringify(updated) })
+    const serialized = JSON.stringify(updated)
+    await accDb.settings.put({ key: 'owner_permissions', value: serialized })
+    if (currentRole === 'admin') await pushSharedSetting('owner_permissions', serialized)
     window.dispatchEvent(new Event('accounting-settings-updated'))
   }
 
   const updateCardOrder = async (newOrder) => {
     setCardOrder(newOrder)
-    await accDb.settings.put({ key: 'card_order', value: JSON.stringify(newOrder) })
+    const serialized = JSON.stringify(newOrder)
+    await accDb.settings.put({ key: 'card_order', value: serialized })
+    if (currentRole === 'admin') await pushSharedSetting('card_order', serialized)
     window.dispatchEvent(new Event('accounting-settings-updated'))
   }
 
   const updateShopName = async (name) => {
     setShopName(name)
     await accDb.settings.put({ key: 'shop_name', value: name })
+    if (currentRole === 'admin') await pushSharedSetting('shop_name', name)
     window.dispatchEvent(new Event('accounting-settings-updated'))
   }
 
@@ -520,6 +616,40 @@ export function AuthProvider({ children }) {
     window.dispatchEvent(new Event('accounting-settings-updated'))
   }
 
+  // ── Real account roles (profiles table). Local device PINs never carry a role. ──
+  const listAccounts = async () => {
+    if (currentRole !== 'admin') return []
+    const { data, error } = await supabase.from('profiles').select('id, full_name, role, created_at').order('created_at', { ascending: true })
+    if (error) throw new Error(error.message)
+    return data || []
+  }
+
+  const changeAccountRole = async (userId, role) => {
+    if (currentRole !== 'admin') throw new Error('Only an administrator can change roles.')
+    if (!ROLES.includes(role)) throw new Error('Unknown role.')
+    if (userId === sessionUser?.id && role !== 'admin') {
+      const admins = (await listAccounts()).filter((account) => account.role === 'admin')
+      if (admins.length <= 1) throw new Error('You are the only administrator. Promote someone else first.')
+    }
+    const { data, error } = await supabase.from('profiles').update({ role }).eq('id', userId).select('id, role')
+    if (error) throw new Error(error.message)
+    if (!data?.length) throw new Error('The role was not changed (permission denied).')
+    if (userId === sessionUser?.id) await refreshRole()
+    return data[0]
+  }
+
+  const createAccount = async ({ email, password, fullName, role }) => {
+    if (currentRole !== 'admin') throw new Error('Only an administrator can add accounts.')
+    const { data, error } = await supabase.functions.invoke('create-user', { body: { email, password, fullName, role } })
+    if (error) {
+      let detail = error.message
+      try { detail = (await error.context?.json?.())?.error || detail } catch { /* keep generic message */ }
+      throw new Error(detail)
+    }
+    if (data?.error) throw new Error(data.error)
+    return data?.user
+  }
+
   const isAuthenticated = Boolean(sessionUser && isPinUnlocked)
   const isOwner = currentRole === 'owner' || currentRole === 'employee'
   const isAdmin = currentRole === 'admin'
@@ -556,6 +686,9 @@ export function AuthProvider({ children }) {
     updatePins,
     saveTeamUser,
     removeTeamUser,
+    listAccounts,
+    changeAccountRole,
+    createAccount,
   }
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

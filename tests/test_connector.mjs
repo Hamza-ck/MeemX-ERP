@@ -263,14 +263,15 @@ describe('Connector: tally_client', () => {
     assert.ok(response.includes('Widget A'), 'Should contain stock item')
   })
 
-  it('builds export request with date range', () => {
-    const xml = buildExportRequest('All Masters', 'MyCo', {
-      fromDate: '20261001',
-      toDate: '20261031',
-    })
-    assert.ok(xml.includes('<SVFROMDATE>20261001</SVFROMDATE>'))
-    assert.ok(xml.includes('<SVTODATE>20261031</SVTODATE>'))
-    assert.ok(xml.includes('<TALLYREQUEST>Export</TALLYREQUEST>'))
+  it('builds export request with date range (compact dates for vouchers, d-Mon-yyyy for reports)', () => {
+    const vouchers = buildExportRequest('Day Book', 'MyCo', { fromDate: '20261001', toDate: '20261031' })
+    assert.ok(vouchers.includes('<SVFROMDATE TYPE="Date">20261001</SVFROMDATE>'))
+    assert.ok(vouchers.includes('<SVTODATE TYPE="Date">20261031</SVTODATE>'))
+    assert.ok(vouchers.includes('<TALLYREQUEST>Export</TALLYREQUEST>'))
+
+    const report = buildExportRequest('All Masters', 'MyCo', { fromDate: '20261001', toDate: '20261031' })
+    assert.ok(report.includes('<SVFROMDATE TYPE="Date">1-Oct-2026</SVFROMDATE>'))
+    assert.ok(report.includes('<SVTODATE TYPE="Date">31-Oct-2026</SVTODATE>'))
   })
 
   it('decodes UTF-16LE response', () => {

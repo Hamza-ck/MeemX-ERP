@@ -11,7 +11,7 @@ import {
 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { accDb } from '../lib/accountingDb'
-import { calculateDashboardMetrics } from '../lib/dashboardMetrics'
+import { calculateDashboardMetrics, computeDebtorAging } from '../lib/dashboardMetrics'
 import { supabase, supabaseConfigured } from '../lib/supabaseClient'
 import SalesBarChart from '../components/SalesBarChart'
 import Nav from '../components/Nav'
@@ -33,16 +33,19 @@ export default function DashboardPage() {
   const [liveMetrics, setLiveMetrics] = useState(null)
   const [liveDebtors, setLiveDebtors] = useState(null)
   const [isSyncStale, setIsSyncStale] = useState(false)
+  const [lastUpdatedLabel, setLastUpdatedLabel] = useState('Live local books')
   const navigate = useNavigate()
 
   // Format currency in Indian standard Lakhs/Crores
   const formatMoney = (val, compact = true) => {
     const num = Number(val) || 0
+    const sign = num < 0 ? '-' : ''
+    const abs = Math.abs(num)
     if (compact) {
-      if (Math.abs(num) >= 10000000) return `₹${(num / 10000000).toFixed(1)}Cr`
-      if (Math.abs(num) >= 100000) return `₹${(num / 100000).toFixed(1)}L`
-      if (Math.abs(num) >= 1000) return `₹${(num / 1000).toFixed(1)}K`
-      return `₹${num}`
+      if (abs >= 10000000) return `${sign}₹${(abs / 10000000).toFixed(1)}Cr`
+      if (abs >= 100000) return `${sign}₹${(abs / 100000).toFixed(1)}L`
+      if (abs >= 1000) return `${sign}₹${(abs / 1000).toFixed(1)}K`
+      return `${sign}₹${abs}`
     }
     return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(num)
   }
@@ -53,24 +56,36 @@ export default function DashboardPage() {
 
     async function loadData() {
       try {
-        const [parties, materials, ledgers, vouchers] = await Promise.all([
+        const [parties, materials, ledgers, vouchers, syncSetting] = await Promise.all([
           accDb.parties.toArray(),
           accDb.materials.toArray(),
           accDb.ledgers.toArray(),
           accDb.vouchers.toArray(),
+          accDb.settings.get('last_cloud_sync'),
         ])
         if (!active) return
+
+        if (syncSetting?.value) {
+          const dt = new Date(syncSetting.value)
+          if (!Number.isNaN(dt.getTime())) {
+            setLastUpdatedLabel(
+              `Updated ${dt.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}, ${dt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
+            )
+          }
+        }
 
         const debtors = parties.filter((p) => p.type === 'debtor')
         const creditors = parties.filter((p) => p.type === 'creditor')
 
-        const debtorsSum = debtors.reduce((s, d) => s + (Number(d.current_balance) || 0), 0)
+        const { totalOwed: debtorsSum, enrichedDebtors } = computeDebtorAging(debtors, vouchers)
         const creditorsSum = creditors.reduce((s, c) => s + (Number(c.current_balance) || 0), 0)
         let missingValuation = 0
         const stockSum = materials.reduce((sum, material) => {
           if (material.current_value != null && Number.isFinite(Number(material.current_value))) {
             return sum + Number(material.current_value)
           }
+          const fallback = (Number(material.current_qty) || 0) * (Number(material.purchase_rate) || 0)
+          if (fallback !== 0) return sum + fallback
           missingValuation += 1
           return sum
         }, 0)
@@ -83,7 +98,7 @@ export default function DashboardPage() {
           .reduce((s, l) => s + (Number(l.current_balance) || 0), 0)
 
         // Keep dashboard date totals in one pass through voucher history.
-        const calculated = calculateDashboardMetrics(vouchers, ledgers)
+        const calculated = calculateDashboardMetrics(vouchers, ledgers, new Date(), materials)
         const {
           salesToday, salesWeek, salesMonth,
           expensesToday, expensesWeek, expensesMonth,
@@ -116,19 +131,19 @@ export default function DashboardPage() {
           sales7DaysTotal,
         })
 
-        const topDebtors = debtors
+        const topDebtors = enrichedDebtors
           .filter((d) => (Number(d.current_balance) || 0) > 0)
           .sort((a, b) => (Number(b.current_balance) || 0) - (Number(a.current_balance) || 0))
           .slice(0, 5)
           .map((d) => {
-            const days = Number(d.due_days) || 10
+            const age = d.age_bucket || '0–30d'
             return {
               name: d.name,
-              age: d.age_bucket || (days > 60 ? '60d+' : days > 30 ? '31–60d' : '0–30d'),
+              age,
               ageTone:
-                days > 60
+                age === '60d+'
                   ? 'bg-[#fcebe6] text-[#ba3e29]'
-                  : days > 30
+                  : age === '31–60d'
                   ? 'bg-[#e2f3ec] text-[#0d786d]'
                   : 'bg-[#e3f2ec] text-[#136b60]',
               amount: `₹${(Number(d.current_balance) || 0).toLocaleString('en-IN')}`,
@@ -689,7 +704,7 @@ export default function DashboardPage() {
                 <h3 className="text-sm font-extrabold text-[#143d35]">
                   Sales, last 7 days
                 </h3>
-      <span className="text-xs text-[#718b82]">Daily revenue trend</span>
+                <span className="text-xs text-[#718b82]">Daily revenue trend</span>
               </div>
               <strong className="text-base font-extrabold text-[#0e655d]">
                 {formatMoney(sales7DaysTotal)}
@@ -754,12 +769,14 @@ export default function DashboardPage() {
                   <p className="mt-1 text-[11px] text-[#78968d]">
                     Import customer accounts &amp; vouchers from Tally to see aging receivables.
                   </p>
-                  <Link
-                    to="/tally"
-                    className="mt-3 inline-flex items-center gap-1.5 rounded-xl bg-[#0e655d] px-3.5 py-1.5 text-xs font-extrabold text-white no-underline shadow-xs hover:bg-[#0a4f49]"
-                  >
-                    Import from Tally
-                  </Link>
+                  {isAdmin && (
+                    <Link
+                      to="/tally"
+                      className="mt-3 inline-flex items-center gap-1.5 rounded-xl bg-[#0e655d] px-3.5 py-1.5 text-xs font-extrabold text-white no-underline shadow-xs hover:bg-[#0a4f49]"
+                    >
+                      Import from Tally
+                    </Link>
+                  )}
                 </div>
               )}
             </div>
@@ -768,7 +785,7 @@ export default function DashboardPage() {
 
         {/* Bottom Timestamp (PDF Page 1 & 5) */}
         <footer className="mt-8 mb-4 text-center text-xs text-[#78938a]">
-          Updated 17 Oct, 6:40 PM
+          {lastUpdatedLabel}
         </footer>
       </main>
     </div>

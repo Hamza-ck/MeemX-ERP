@@ -11,29 +11,32 @@ import {
 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { accDb } from '../lib/accountingDb'
+import { computeDebtorAging } from '../lib/dashboardMetrics'
 import Nav from '../components/Nav'
 import AdminEditModal from '../components/AdminEditModal'
 
 export default function DebtorsPage() {
-  const { shopName } = useAuth()
+  const { shopName, isAdmin } = useAuth()
   const navigate = useNavigate()
   const [searchTerm, setSearchTerm] = useState('')
   const [customers, setCustomers] = useState([])
+  const [vouchers, setVouchers] = useState([])
   const [whatsappSent, setWhatsappSent] = useState(null)
   const [callModal, setCallModal] = useState(null)
   const [editingDebtor, setEditingDebtor] = useState(null)
 
-  // Load debtors from Dexie DB
+  // Load debtors & vouchers from Dexie DB
   const loadDebtors = useCallback(async () => {
     try {
-      const dbDebtors = await accDb.parties.where('type').equals('debtor').toArray()
-      if (dbDebtors && dbDebtors.length > 0) {
-        setCustomers(dbDebtors)
-      } else {
-        setCustomers([])
-      }
+      const [dbDebtors, dbVouchers] = await Promise.all([
+        accDb.parties.where('type').equals('debtor').toArray(),
+        accDb.vouchers.toArray(),
+      ])
+      setCustomers(dbDebtors || [])
+      setVouchers(dbVouchers || [])
     } catch {
       setCustomers([])
+      setVouchers([])
     }
   }, [])
 
@@ -44,50 +47,24 @@ export default function DebtorsPage() {
     return () => window.removeEventListener('accounting-data-updated', onUpdate)
   }, [loadDebtors])
 
-  // Total owed to you
-  const totalOwed = useMemo(() => {
-    return customers.reduce((acc, c) => acc + (Number(c.current_balance) || 0), 0)
-  }, [customers])
-
-  // 3-segment Aging Breakdown (0-30d, 31-60d, 60d+)
+  // Real invoice-based aging breakdown (0–30d, 31–60d, 60d+)
   const agingStats = useMemo(() => {
-    let cat0to30 = 0
-    let cat31to60 = 0
-    let cat60plus = 0
+    return computeDebtorAging(customers, vouchers)
+  }, [customers, vouchers])
 
-    customers.forEach((c) => {
-      const bal = Number(c.current_balance) || 0
-      const days = Number(c.due_days) || 10
-      if (days > 60) cat60plus += bal
-      else if (days > 30) cat31to60 += bal
-      else cat0to30 += bal
-    })
-
-    const total = cat0to30 + cat31to60 + cat60plus || 1
-    const p1 = Math.round((cat0to30 / total) * 100)
-    const p2 = Math.round((cat31to60 / total) * 100)
-    const p3 = Math.max(0, 100 - p1 - p2)
-
-    return {
-      cat0to30,
-      cat31to60,
-      cat60plus,
-      p1: `${p1}%`,
-      p2: `${p2}%`,
-      p3: `${p3}%`,
-    }
-  }, [customers])
+  const totalOwed = agingStats.totalOwed
 
   const filteredCustomers = useMemo(() => {
-    if (!searchTerm.trim()) return customers
+    const list = agingStats.enrichedDebtors
+    if (!searchTerm.trim()) return list
     const term = searchTerm.toLowerCase()
-    return customers.filter(
+    return list.filter(
       (c) =>
         c.name.toLowerCase().includes(term) ||
         (c.phone && c.phone.includes(term)) ||
         (c.uid && c.uid.toLowerCase().includes(term))
     )
-  }, [customers, searchTerm])
+  }, [agingStats.enrichedDebtors, searchTerm])
 
   const handleCall = (cust) => {
     setCallModal(cust)
@@ -103,7 +80,6 @@ export default function DebtorsPage() {
     setTimeout(() => setWhatsappSent(null), 3500)
   }
 
-  // Add Debtor Handler
   return (
     <div className="min-h-screen bg-[#f4f7f4] pb-24 lg:pl-64 lg:pb-10 font-sans">
       <Nav />
@@ -125,15 +101,17 @@ export default function DebtorsPage() {
             </h1>
           </div>
 
-          <button
-            type="button"
-            onClick={() => navigate('/tally')}
-            className="flex items-center gap-1.5 rounded-2xl bg-[#0e655d] px-3.5 py-2 text-xs font-extrabold text-white shadow-xs hover:bg-[#0a4f49] transition active:scale-95"
-            title="Import debtors and closing balances from Tally"
-          >
-            <FileSpreadsheet size={16} strokeWidth={2.5} />
-            <span>Tally import</span>
-          </button>
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={() => navigate('/tally')}
+              className="flex items-center gap-1.5 rounded-2xl bg-[#0e655d] px-3.5 py-2 text-xs font-extrabold text-white shadow-xs hover:bg-[#0a4f49] transition active:scale-95"
+              title="Import debtors and closing balances from Tally"
+            >
+              <FileSpreadsheet size={16} strokeWidth={2.5} />
+              <span>Tally import</span>
+            </button>
+          )}
         </header>
 
         {/* Total Owed Card & 3-segment Aging Progress Bar (PDF Page 2) */}
@@ -196,12 +174,12 @@ export default function DebtorsPage() {
           {filteredCustomers.length > 0 ? (
             filteredCustomers.map((cust) => {
               const bal = Number(cust.current_balance) || 0
-              const days = Number(cust.due_days) || 10
-              const isCritical = days > 60
+              const age = cust.age_bucket || '0–30d'
+              const isCritical = age === '60d+'
 
               return (
                 <article
-                  key={cust.id}
+                  key={cust.id || cust.name}
                   className="rounded-3xl border border-[#e1e9e3] bg-white p-5 shadow-xs transition hover:shadow-md"
                 >
                   <div className="flex items-start justify-between">
@@ -229,12 +207,12 @@ export default function DebtorsPage() {
                         className={`mt-1 inline-block rounded-md px-2.5 py-0.5 text-[11px] font-bold ${
                           isCritical
                             ? 'bg-[#feeae6] text-[#b73725]'
-                            : days > 30
+                            : age === '31–60d'
                             ? 'bg-[#e2f3ec] text-[#0d786d]'
                             : 'bg-[#e4f1eb] text-[#146b60]'
                         }`}
                       >
-                        {cust.age_bucket || (days > 60 ? '60d+' : days > 30 ? '31–60d' : '0–30d')}
+                        {age}
                       </span>
                     </div>
                   </div>
@@ -265,15 +243,17 @@ export default function DebtorsPage() {
                       </button>
                     )}
 
-                    <button
-                      type="button"
-                      onClick={() => setEditingDebtor(cust)}
-                      className="flex items-center gap-1.5 rounded-xl border border-[#0e655d]/30 bg-[#f0f9f5] px-3.5 py-1.5 text-xs font-bold text-[#0e655d] hover:bg-[#e2f3ec] transition active:scale-95"
-                      title="Admin edit debtor details"
-                    >
-                      <Edit3 size={13} />
-                      <span>Edit</span>
-                    </button>
+                    {isAdmin && (
+                      <button
+                        type="button"
+                        onClick={() => setEditingDebtor(cust)}
+                        className="flex items-center gap-1.5 rounded-xl border border-[#0e655d]/30 bg-[#f0f9f5] px-3.5 py-1.5 text-xs font-bold text-[#0e655d] hover:bg-[#e2f3ec] transition active:scale-95"
+                        title="Admin edit debtor details"
+                      >
+                        <Edit3 size={13} />
+                        <span>Edit</span>
+                      </button>
+                    )}
                   </div>
                 </article>
               )

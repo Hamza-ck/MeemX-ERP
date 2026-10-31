@@ -10,7 +10,7 @@
  *   node connector/sync.mjs incremental --loop --every 15
  *
  * Environment / .env:
- *   TALLY_HOST, TALLY_PORT, TALLY_COMPANY (optional; defaults to the active Tally company),
+ *   TALLY_HOST, TALLY_PORT, TALLY_COMPANY (required: exact company name in Tally),
  *   SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_EMAIL, SUPABASE_PASSWORD
  */
 
@@ -77,7 +77,8 @@ Commands:
                --from YYYY-MM-DD  (required)
                --to   YYYY-MM-DD  (default: today)
 
-  incremental  Sync from (last successful sync - 7 days) to today.
+  incremental  Sync from (last successful run - 7 days) to today; once a day also
+               re-reads and reconciles the whole financial year.
                --max-days N       Days to pull on first run (default: 30)
                --chunk-days N     Days per chunk window (default: 15)
                --loop             Run repeatedly until Ctrl+C
@@ -86,7 +87,7 @@ Commands:
 Options:
   --tally-host HOST       Override TALLY_HOST (default: 127.0.0.1)
   --tally-port PORT       Override TALLY_PORT (default: 9000)
-  --tally-company NAME    Select a company (defaults to the active company in Tally)
+  --tally-company NAME    Company name exactly as in Tally (required)
   --allow-remote          Allow non-loopback Tally host (UNSAFE)
   --max-days N            Lookback window in days for first-run incremental (default: 30)
   --chunk-days N          Days per chunk window for sequential pull (default: 15)
@@ -178,223 +179,275 @@ async function cmdDiscover(config, values) {
   console.log('   Inspect the files and send them to me if you need help with normalization.\n')
 }
 
+// Large vouchers collections are split by date until each upload is small enough for the
+// edge function (base64 length). A busy month used to exceed the limit and silently never sync.
+const MAX_PAYLOAD_B64 = 4_000_000
+
+const num = (value) => Number(value) || 0
+const stamp = (result) => ({
+  ins: num(result.commit?.inserted), upd: num(result.commit?.updated),
+  skip: num(result.commit?.skipped), del: num(result.commit?.deleted),
+})
+
 /**
- * pull — Full sync for a date range.
+ * Push one Tally export (masters / stock / stock summary) unless it is identical to the
+ * last successfully pushed copy. Returns 'ok' | 'unchanged' | 'empty' | throws.
  */
-async function cmdPull(config, values) {
-  const today = localDateString(new Date())
-  const fromDate = values.from
-  const toDate = values.to || today
+async function pushExport({ config, accessToken, state, key, xml, filename, extra = {}, force = false, label, countFn }) {
+  const hash = sha256(xml)
+  if (!force && state.hashes[key] === hash) {
+    console.log(`   ⏭️  ${label}: unchanged since last sync`)
+    return 'unchanged'
+  }
+  const payload = buildPreviewPayload(xml, config.tally.company, filename, extra)
+  const result = await previewAndCommit(config.supabase, accessToken, payload)
+  const { ins, upd, skip } = stamp(result)
+  console.log(`   ✅ ${label}: ${countFn(xml)} → ${ins} inserted, ${upd} updated, ${skip} unchanged`)
+  state.hashes[key] = hash
+  return 'ok'
+}
 
-  if (!fromDate) {
-    console.error('❌ --from YYYY-MM-DD is required for the pull command.')
-    process.exitCode = 1
+/**
+ * Sync vouchers for [fromYmd, toYmd]. Splits the range when the payload is too large.
+ * Every upload carries its window so deletions/cancellations in Tally propagate.
+ */
+async function syncVoucherRange({ config, accessToken, state, fromDate, toDate, label, force, totals }) {
+  const response = await sendToTally(
+    buildExportRequest('Day Book', config.tally.company, { fromDate, toDate }),
+    config.tally,
+  )
+  if (!/<ENVELOPE/i.test(response)) throw new Error('Tally returned a response without an <ENVELOPE>; refusing to reconcile.')
+
+  const key = `vouchers:${fromDate}-${toDate}`
+  const hash = sha256(response)
+  const window = { from: ymdToIso(fromDate), to: ymdToIso(toDate) }
+  const payload = buildPreviewPayload(response, config.tally.company, `tally-vouchers-${fromDate}-${toDate}.xml`, { window })
+
+  if (payload.contentBase64.length > MAX_PAYLOAD_B64) {
+    const halves = splitRange(fromDate, toDate)
+    if (!halves) throw new Error(`A single day (${fromDate}) exceeds the upload limit; cannot split further.`)
+    console.log(`   ↔️  ${label}: ${(payload.contentBase64.length / 1e6).toFixed(1)} MB — splitting`)
+    for (const half of halves) {
+      await new Promise((r) => setTimeout(r, 300))
+      await syncVoucherRange({ config, accessToken, state, fromDate: half.fromDate, toDate: half.toDate, label: `${half.fromDate}–${half.toDate}`, force, totals })
+    }
     return
   }
 
-  console.log(`\n📥 Pull: syncing ${fromDate} → ${toDate}`)
-  console.log(`   Tally: ${config.tally.host}:${config.tally.port}, Company: ${config.tally.company || 'active company'}`)
-  console.log(`   Supabase: ${redactUrl(config.supabase.url)}\n`)
+  if (!force && state.hashes[key] === hash) {
+    console.log(`   ${label}: unchanged since last sync`)
+    return
+  }
+  const result = await previewAndCommit(config.supabase, accessToken, payload)
+  const { ins, upd, skip, del } = stamp(result)
+  totals.inserted += ins; totals.updated += upd; totals.deleted += del
+  const note = result.commit?.reconcileNote ? ` (deletion check ${result.commit.reconcileNote})` : ''
+  console.log(`   ${label}: ${countElements(response).voucherCount} vouchers → ${ins} inserted, ${upd} updated, ${skip} unchanged, ${del} removed${note}`)
+  state.hashes[key] = hash
+}
 
+/**
+ * Core run: masters, stock, then vouchers for [fromDate, toDate] (YYYY-MM-DD).
+ * @returns {Promise<{ failures: number }>}
+ */
+async function runSync(config, accessToken, { fromDate, toDate, force = false, state }) {
   let failures = 0
+  const company = config.tally.company
 
-  // Authenticate with Supabase
-  let accessToken
+  // 1. Account groups → lets sub-groups of Sundry Debtors/Creditors etc. classify correctly.
+  let groups = {}
+  console.log('\n📋 Pulling account groups...')
   try {
-    accessToken = await authenticate(config.supabase)
-    console.log('🔐 Authenticated with Supabase.')
+    const groupsXml = await sendToTally(buildExportRequest('List of Groups', company), config.tally)
+    groups = extractGroupParents(groupsXml)
+    console.log(`   ✅ ${Object.keys(groups).length} groups`)
   } catch (err) {
-    console.error(`❌ Auth failed: ${err.message}`)
-    process.exitCode = 1
-    return
+    console.warn(`   ⚠️  Groups unavailable (${err.message}); falling back to name-based classification.`)
   }
 
-  // 1. Masters (Ledgers)
+  // 2. Ledgers
   console.log('\n📋 Pulling ledgers...')
   try {
-    const mastersXml = buildExportRequest('List of Accounts', config.tally.company)
-    const mastersResponse = await sendToTally(mastersXml, config.tally)
-    if (hasData(mastersResponse)) {
-      const payload = buildPreviewPayload(mastersResponse, config.tally.company, `tally-masters-${toDate}.xml`)
-      const result = await previewAndCommit(config.supabase, accessToken, payload)
-      const ins = result.commit?.inserted ?? 0
-      const upd = result.commit?.updated ?? 0
-      const skip = result.commit?.skipped ?? 0
-      const mc = countElements(mastersResponse)
-      console.log(`   ✅ Ledgers: ${mc.ledgerCount} ledgers → ${ins} inserted, ${upd} updated, ${skip} unchanged`)
+    const xml = await sendToTally(buildExportRequest('List of Accounts', company), config.tally)
+    if (hasData(xml)) {
+      await pushExport({ config, accessToken, state, key: 'masters', xml, filename: `tally-masters-${toDate}.xml`, extra: { groups }, force, label: 'Ledgers', countFn: (x) => `${countElements(x).ledgerCount} ledgers` })
     } else {
-      console.log('   ℹ️  No master data returned by Tally.')
-      failures++
+      console.warn('   ⚠️  Tally returned no ledgers — check TALLY_COMPANY and that the company is open.')
     }
   } catch (err) {
     failures++
     console.error(`   ❌ Ledgers failed: ${err.message}`)
   }
 
-  // 1b. Stock Items
+  // 3. Stock items
   console.log('\n📋 Pulling stock items...')
   try {
-    const stockXml = buildExportRequest('List of Stock Items', config.tally.company)
-    const stockResponse = await sendToTally(stockXml, config.tally)
-    if (hasData(stockResponse)) {
-      const payload = buildPreviewPayload(stockResponse, config.tally.company, `tally-stock-${toDate}.xml`)
-      const result = await previewAndCommit(config.supabase, accessToken, payload)
-      const ins = result.commit?.inserted ?? 0
-      const upd = result.commit?.updated ?? 0
-      const skip = result.commit?.skipped ?? 0
-      const sc = countElements(stockResponse)
-      console.log(`   ✅ Stock Items: ${sc.stockCount} items → ${ins} inserted, ${upd} updated, ${skip} unchanged`)
+    const xml = await sendToTally(buildExportRequest('List of Stock Items', company), config.tally)
+    if (hasData(xml)) {
+      await pushExport({ config, accessToken, state, key: 'stock', xml, filename: `tally-stock-${toDate}.xml`, force, label: 'Stock items', countFn: (x) => `${countElements(x).stockCount} items` })
     } else {
       console.log('   ℹ️  No stock items returned by Tally.')
-      failures++
     }
   } catch (err) {
     failures++
     console.error(`   ❌ Stock items failed: ${err.message}`)
   }
 
-  // 1c. The item-wise Stock Summary carries the live quantity, valuation rate,
-  // and closing value; the StockItem master export omits these on some Tally builds.
+  // 4. Item-wise stock summary = live quantity, average rate, value
   console.log('\n📋 Pulling item-wise stock values...')
   try {
-    const stockSummaryXml = buildExportRequest('Stock Summary', config.tally.company, {
-      toDate: toDate.replace(/-/g, ''),
-    })
-    const stockSummaryResponse = await sendToTally(stockSummaryXml, config.tally)
-    const summaryCount = countElements(stockSummaryResponse).stockSummaryCount
-    if (summaryCount > 0) {
-      const payload = buildPreviewPayload(
-        stockSummaryResponse,
-        config.tally.company,
-        `tally-stock-summary-${toDate}.xml`
-      )
-      const result = await previewAndCommit(config.supabase, accessToken, payload)
-      const ins = result.commit?.inserted ?? 0
-      const upd = result.commit?.updated ?? 0
-      const skip = result.commit?.skipped ?? 0
-      console.log(`   ✅ Stock values: ${summaryCount} items → ${ins} inserted, ${upd} updated, ${skip} unchanged`)
+    const xml = await sendToTally(buildExportRequest('Stock Summary', company, { toDate: toDate.replace(/-/g, '') }), config.tally)
+    if (countElements(xml).stockSummaryCount > 0) {
+      await pushExport({ config, accessToken, state, key: 'stock-summary', xml, filename: `tally-stock-summary-${toDate}.xml`, force, label: 'Stock values', countFn: (x) => `${countElements(x).stockSummaryCount} items` })
     } else {
       console.log('   ℹ️  Tally returned no item-wise stock values.')
-      failures++
     }
   } catch (err) {
     failures++
     console.error(`   ❌ Stock values failed: ${err.message}`)
   }
 
-  // 2. Vouchers in sequential chunk windows from Tally's dated voucher collection.
-  const chunkDays = values['chunk-days'] ? Number.parseInt(values['chunk-days'], 10) : 15
-  const chunks = chunkDays ? dayChunks(fromDate, toDate, chunkDays) : monthlyChunks(fromDate, toDate)
-  console.log(`\n📋 Pulling vouchers in ${chunks.length} chunk(s) (${chunkDays || 15} days each)...`)
-
-  let totalInserted = 0
-  let totalSkipped = 0
-  let lastJobId = null
-  let maxVoucherDate = null
-
+  // 5. Vouchers (monthly chunks, adaptively split)
+  const chunks = monthlyChunks(fromDate, toDate)
+  console.log(`\n📋 Pulling vouchers ${fromDate} → ${toDate} in ${chunks.length} chunk(s)${force ? ' (full reconcile)' : ''}...`)
+  const totals = { inserted: 0, updated: 0, deleted: 0 }
   for (const chunk of chunks) {
-    // 500ms pause allows Tally's single-threaded HTTP listener to recycle sockets cleanly
+    // Tally's HTTP listener is single-threaded; give it a moment between requests.
     await new Promise((r) => setTimeout(r, 500))
     try {
-      const voucherXml = buildExportRequest('Day Book', config.tally.company, {
-        fromDate: chunk.fromDate,
-        toDate: chunk.toDate,
-      })
-      const response = await sendToTally(voucherXml, config.tally)
-
-      if (!hasData(response)) {
-        console.log(`   ${chunk.label}: no data`)
-        continue
-      }
-
-      const chunkMaxDate = extractMaxVoucherDate(response)
-      if (chunkMaxDate && (!maxVoucherDate || chunkMaxDate > maxVoucherDate)) {
-        maxVoucherDate = chunkMaxDate
-      }
-
-      const payload = buildPreviewPayload(
-        response,
-        config.tally.company,
-        `tally-vouchers-${chunk.fromDate}-${chunk.toDate}.xml`
-      )
-      const result = await previewAndCommit(config.supabase, accessToken, payload)
-      const ins = result.commit?.inserted ?? 0
-      const skip = result.commit?.skipped ?? 0
-      totalInserted += ins
-      totalSkipped += skip
-      if (result.commit?.jobId) lastJobId = result.commit.jobId
-      const vc = countElements(response)
-      const upd = result.commit?.updated ?? 0
-      console.log(`   ${chunk.label}: ${vc.voucherCount} vouchers → ${ins} inserted, ${upd} updated, ${skip} unchanged`)
+      await syncVoucherRange({ config, accessToken, state, fromDate: chunk.fromDate, toDate: chunk.toDate, label: chunk.label, force, totals })
     } catch (err) {
       failures++
       console.error(`   ❌ ${chunk.label} failed: ${err.message}`)
-      // Continue with next chunk — earlier chunks are already saved
     }
   }
-
-  console.log(`\n📊 Summary: ${totalInserted} inserted, ${totalSkipped} skipped, ${failures} failed chunk(s)`)
-
-  if (failures === 0 && lastJobId) {
-    try {
-      await setLastSyncDate(config.supabase, accessToken, lastJobId, maxVoucherDate)
-    } catch { /* best effort */ }
-  }
-
-  if (failures > 0) {
-    process.exitCode = 1
-  }
-
-  console.log('✅ Pull complete.\n')
+  console.log(`\n📊 Vouchers: ${totals.inserted} inserted, ${totals.updated} updated, ${totals.deleted} removed, ${failures} failure(s)`)
+  return { failures }
 }
 
 /**
- * incremental — Sync from (last sync - 7 days overlap) to today.
+ * pull — Full sync for a date range (always uploads; ignores the unchanged-payload cache).
  */
-async function cmdIncremental(config, values) {
-  console.log('\n🔄 Incremental sync...')
-
-  // Authenticate
-  let accessToken
-  try {
-    accessToken = await authenticate(config.supabase)
-  } catch (err) {
-    console.error(`❌ Auth failed: ${err.message}`)
+async function cmdPull(config, values) {
+  const today = localDateString(new Date())
+  const fromDate = values.from
+  const toDate = values.to || today
+  if (!fromDate) {
+    console.error('❌ --from YYYY-MM-DD is required for the pull command.')
     process.exitCode = 1
     return
   }
 
-  // Read last sync date
-  let lastSync = null
-  try {
-    lastSync = await getLastSyncDate(config.supabase, accessToken)
-  } catch { /* first run */ }
-
-  const parsedMaxDays = Number.parseInt(values['max-days'] || '30', 10)
-  const maxDays = Number.isFinite(parsedMaxDays) && parsedMaxDays > 0 ? parsedMaxDays : 30
-
-  const today = localDateString(new Date())
-  let fromDate
-
-  if (lastSync) {
-    // Subtract 7 days for overlap (vouchers can be edited retroactively)
-    const d = new Date(lastSync)
-    d.setDate(d.getDate() - 7)
-    fromDate = localDateString(d)
-    console.log(`   Last sync: ${lastSync}`)
-    console.log(`   Pulling from ${fromDate} (7-day overlap) to ${today}`)
-  } else {
-    // First run — default to max-days (default 30, not 90)
-    const d = new Date()
-    d.setDate(d.getDate() - maxDays)
-    fromDate = localDateString(d)
-    console.log(`   First run — pulling last ${maxDays} days (${fromDate} to ${today})`)
+  const release = acquireLock()
+  if (!release) {
+    console.warn('⏳ Another sync is already running; skipping this one.')
+    return
   }
+  try {
+    console.log(`\n📥 Pull: syncing ${fromDate} → ${toDate}`)
+    console.log(`   Tally: ${config.tally.host}:${config.tally.port}, Company: ${config.tally.company}`)
+    console.log(`   Supabase: ${redactUrl(config.supabase.url)}\n`)
 
-  // Delegate to pull logic
-  values.from = fromDate
-  values.to = today
-  await cmdPull(config, values)
+    let accessToken
+    try {
+      accessToken = await authenticate(config.supabase)
+      console.log('🔐 Authenticated with Supabase.')
+    } catch (err) {
+      console.error(`❌ Auth failed: ${err.message}`)
+      process.exitCode = 1
+      return
+    }
+
+    const runStartedAt = new Date()
+    const state = loadState()
+    const { failures } = await runSync(config, accessToken, { fromDate, toDate, force: true, state })
+    saveState(state)
+    // Only a pull that reaches today may move the cursor; a historical back-fill must not make
+    // the incremental run skip the days after it.
+    if (failures === 0 && toDate >= today) {
+      try { await setLastSyncDate(config.supabase, accessToken, null, undefined, runStartedAt) } catch (err) {
+        console.error(`   ⚠️  ${err.message}`)
+        process.exitCode = 1
+      }
+    }
+    if (failures > 0) process.exitCode = 1
+    console.log('✅ Pull complete.\n')
+  } finally {
+    release()
+  }
+}
+
+/**
+ * incremental — Sync (cursor − 7 days) → today. Once per calendar day it additionally
+ * re-reads the whole current financial year and reconciles it, which self-heals edits
+ * to old vouchers, deletions, and anything an earlier failed run missed.
+ */
+async function cmdIncremental(config, values) {
+  const release = acquireLock()
+  if (!release) {
+    console.warn('⏳ Another sync is already running; skipping this one.')
+    return
+  }
+  try {
+    console.log('\n🔄 Incremental sync...')
+    let accessToken
+    try {
+      accessToken = await authenticate(config.supabase)
+    } catch (err) {
+      console.error(`❌ Auth failed: ${err.message}`)
+      process.exitCode = 1
+      return
+    }
+
+    let lastSync = null
+    try {
+      lastSync = await getLastSyncDate(config.supabase, accessToken)
+    } catch (err) {
+      console.warn(`   ⚠️  ${err.message}; using the 90-day catch-up window.`)
+    }
+
+    const runStartedAt = new Date()
+    const today = localDateString(runStartedAt)
+    const state = loadState()
+    const needsDailyReconcile = state.lastFullSyncDate !== today
+
+    let fromDate
+    if (lastSync) {
+      const d = new Date(lastSync)
+      d.setDate(d.getDate() - 7)              // overlap: vouchers can be edited retroactively
+      fromDate = localDateString(d)
+      console.log(`   Last successful run: ${lastSync}`)
+    } else {
+      const d = new Date(runStartedAt)
+      d.setDate(d.getDate() - 90)
+      fromDate = localDateString(d)
+      console.log('   No successful run recorded — pulling the last 90 days.')
+    }
+    if (needsDailyReconcile) {
+      const fyStart = financialYearStart(runStartedAt, Number(process.env.FY_START_MONTH) || 4)
+      if (fyStart < fromDate) fromDate = fyStart
+      console.log(`   Daily reconcile due — reading the full financial year from ${fromDate}.`)
+    }
+    console.log(`   Pulling ${fromDate} → ${today}`)
+
+    const { failures } = await runSync(config, accessToken, { fromDate, toDate: today, force: needsDailyReconcile, state })
+    if (failures === 0) {
+      if (needsDailyReconcile) state.lastFullSyncDate = today
+      saveState(state)
+      try {
+        // Cursor = when this run STARTED, so edits made during the run are re-read next time.
+        await setLastSyncDate(config.supabase, accessToken, null, undefined, runStartedAt)
+      } catch (err) {
+        console.error(`   ⚠️  ${err.message}`)
+        process.exitCode = 1
+      }
+    } else {
+      saveState(state)        // keep hashes of the parts that did succeed
+      process.exitCode = 1    // cursor deliberately NOT advanced: the failed window is retried
+    }
+  } finally {
+    release()
+  }
 }
 
 // ─── Loop Mode ───────────────────────────────────────────────────────────────

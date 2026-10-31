@@ -116,3 +116,69 @@ describe('voucher accounting mutations', () => {
     assert.equal((await database.vouchers.get(1)).amount, 100)
   })
 })
+
+describe('voucher accounting regressions', () => {
+  const empty = () => new MemoryDatabase({
+    vouchers: [], materials: [{ id: 9, sku: 'W-1', name: 'Widget', current_qty: 5 }], parties: [],
+    ledgers: [
+      { id: 1, name: 'HDFC Current', group: 'Bank Accounts', current_balance: 1000 },
+      { id: 2, name: 'SBI', group: 'Bank Accounts', current_balance: 500 },
+      { id: 3, name: 'Cash', group: 'Cash-in-hand', current_balance: 100 },
+    ],
+  })
+  const sale = (extra) => ({ voucher_type: 'sales', voucher_no: 'S-9', date: '2026-10-30', party_name: 'New Customer',
+    amount: 1000, paid_amount: 0, due_amount: 1000, payment_mode: 'Cash', items: [], ...extra })
+
+  it('first credit sale to a new customer creates a due of exactly the invoice, not double', async () => {
+    const database = empty()
+    const service = createVoucherMutationService({ database })
+    await service.createVoucher(sale())
+    const [party] = await database.parties.toArray()
+    assert.equal(party.current_balance, 1000)
+  })
+
+  it('posts to the bank the payment mode names, not whichever bank ledger comes first', async () => {
+    const database = empty()
+    const service = createVoucherMutationService({ database })
+    await service.createVoucher(sale({ party_name: 'Cash', paid_amount: 1000, due_amount: 0, payment_mode: 'SBI' }))
+    assert.equal((await database.ledgers.get(2)).current_balance, 1500)
+    assert.equal((await database.ledgers.get(1)).current_balance, 1000)
+    await service.createVoucher(sale({ voucher_no: 'S-10', party_name: 'Cash', paid_amount: 200, due_amount: 0, payment_mode: 'UPI' }))
+    assert.equal((await database.ledgers.get(1)).current_balance, 1200)   // UPI is a bank mode
+  })
+
+  it('an oversold item goes negative and deleting the sale restores the exact stock', async () => {
+    const database = empty()
+    const service = createVoucherMutationService({ database })
+    const v = await service.createVoucher(sale({ party_name: 'Cash', paid_amount: 1000, due_amount: 0,
+      items: [{ material_id: 9, sku: 'W-1', qty: 8 }] }))
+    assert.equal((await database.materials.get(9)).current_qty, -3)
+    await service.deleteVoucher(v.id)
+    assert.equal((await database.materials.get(9)).current_qty, 5)       // was 8 with the old clamp
+  })
+
+  it('credit_note and debit_note reverse stock and party balance accurately', async () => {
+    const database = empty()
+    const service = createVoucherMutationService({ database })
+    await service.createVoucher(sale({ items: [{ material_id: 9, sku: 'W-1', qty: 3 }] }))
+    assert.equal((await database.materials.get(9)).current_qty, 2)
+    const cn = await service.createVoucher({
+      voucher_type: 'credit_note',
+      voucher_no: 'CN-1',
+      date: '2026-10-30',
+      party_name: 'New Customer',
+      amount: 400,
+      paid_amount: 0,
+      due_amount: 400,
+      payment_mode: 'Cash',
+      items: [{ material_id: 9, sku: 'W-1', qty: 1 }],
+    })
+    assert.equal((await database.materials.get(9)).current_qty, 3)
+    const [partyAfterCn] = await database.parties.toArray()
+    assert.equal(partyAfterCn.current_balance, 600)
+    await service.deleteVoucher(cn.id)
+    assert.equal((await database.materials.get(9)).current_qty, 2)
+    const [partyAfterDel] = await database.parties.toArray()
+    assert.equal(partyAfterDel.current_balance, 1000)
+  })
+})

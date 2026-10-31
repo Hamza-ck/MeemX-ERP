@@ -84,18 +84,21 @@ export function buildExportRequest(reportId, company, opts = {}) {
 
   const isStockItems = reportId === 'List of Stock Items'
   const isLedgerList = reportId === 'List of Accounts'
+  const isGroupList = reportId === 'List of Groups'
 
   // Use a dated Voucher collection with its nested accounting/inventory methods.
   // On this Tally instance the Day Book data report returned the active screen date
   // even when period variables were supplied. Explicit master methods also avoid
   // the silent field omissions caused by `FETCH *` on some Tally releases.
-  if (isVoucherCollection || isStockItems || isLedgerList) {
-    const colType = isVoucherCollection ? 'Voucher' : isStockItems ? 'StockItem' : 'Ledger'
+  if (isVoucherCollection || isStockItems || isLedgerList || isGroupList) {
+    const colType = isVoucherCollection ? 'Voucher' : isStockItems ? 'StockItem' : isGroupList ? 'Group' : 'Ledger'
     const collectionName = isVoucherCollection ? 'Tally Vouchers' : reportId
     const fetchMethods = isVoucherCollection
       ? ['Date', 'VoucherNumber', 'VoucherTypeName', 'Amount', 'MasterID', 'GUID', 'PartyLedgerName', 'Narration', 'Reference', 'AllLedgerEntries.*', 'LedgerEntries.*', 'AllInventoryEntries.*', 'InventoryEntries.*']
       : isStockItems
       ? ['Name', 'GUID', 'Parent', 'BaseUnits', 'OpeningBalance', 'OpeningValue', 'OpeningRate', 'ClosingBalance', 'ClosingValue', 'ClosingRate', 'BaseSellingPrice']
+      : isGroupList
+      ? ['Name', 'Parent']
       : ['Name', 'GUID', 'Parent', 'OpeningBalance', 'ClosingBalance', 'LedgerPhone', 'Email', 'Address']
     return [
       '<ENVELOPE>',
@@ -209,7 +212,8 @@ export async function sendToTally(xmlBody, config, opts = {}) {
     fetchFn = globalThis.fetch,
   } = opts
 
-  const url = `http://${config.host}:${config.port}`
+  const hostPart = config.host.includes(':') ? `[${config.host}]` : config.host   // IPv6 literal
+  const url = `http://${hostPart}:${config.port}`
 
   let lastError = null
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -235,6 +239,9 @@ export async function sendToTally(xmlBody, config, opts = {}) {
         clearTimeout(timer)
       }
 
+      if (response.status && !response.ok && response.status >= 500) {
+        throw new Error(`Tally HTTP ${response.status}`)   // transient: retried below
+      }
       const buffer = await response.arrayBuffer()
       const text = decodeTallyResponse(buffer)
 
@@ -251,10 +258,8 @@ export async function sendToTally(xmlBody, config, opts = {}) {
         if (/could not set.*SVCurrentCompany/i.test(errorText)) {
           lastError = new TallyError(`Tally returned an error: ${errorText}`, text)
           if (attempt < maxRetries) {
-            const backoff = initialBackoffMs * Math.pow(2, attempt)
-            process.stderr.write(`   ⏳ Tally still loading (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${backoff}ms…\n`)
-            await new Promise((r) => setTimeout(r, backoff))
-            continue
+            process.stderr.write(`   ⏳ Tally still loading (attempt ${attempt + 1}/${maxRetries + 1}), retrying…\n`)
+            continue   // the loop top applies the backoff once
           }
           throw lastError
         }

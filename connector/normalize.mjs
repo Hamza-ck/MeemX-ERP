@@ -95,7 +95,7 @@ export function prefixVoucherNumbers(xmlText) {
  * @param {string} [filename]  Synthetic filename for the edge function
  * @returns {{ action: string, filename: string, contentBase64: string, companyName: string }}
  */
-export function buildPreviewPayload(xmlText, company, filename) {
+export function buildPreviewPayload(xmlText, company, filename, extra = {}) {
   const normalizedXml = prefixVoucherNumbers(xmlText)
   const contentBase64 = Buffer.from(normalizedXml, 'utf-8').toString('base64')
   return {
@@ -103,7 +103,43 @@ export function buildPreviewPayload(xmlText, company, filename) {
     filename: filename || `tally-connector-${Date.now()}.xml`,
     contentBase64,
     companyName: company,
+    // extra.window = { from, to } (YYYY-MM-DD) lets the server tombstone vouchers deleted in Tally.
+    // extra.groups = { groupName: parentName } resolves sub-groups of Sundry Debtors etc.
+    ...extra,
   }
+}
+
+const decodeEntities = (text) => text
+  .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+  .replace(/&#0*4;/g, '').replace(/&amp;/g, '&')
+
+/** Build { groupName: parentName } from a Tally "List of Groups" export. */
+export function extractGroupParents(xmlText) {
+  const groups = {}
+  for (const match of xmlText.matchAll(/<GROUP\b([^>]*)>([\s\S]*?)<\/GROUP>/gi)) {
+    const nameAttr = match[1].match(/NAME="([^"]*)"/i)
+    const name = nameAttr ? decodeEntities(nameAttr[1]).trim() : ''
+    if (!name) continue
+    const parent = match[2].match(/<PARENT[^>]*>([^<]*)<\/PARENT>/i)
+    groups[name] = parent ? decodeEntities(parent[1]).trim() : ''
+  }
+  return groups
+}
+
+const toDate = (ymd) => new Date(Date.UTC(+ymd.slice(0, 4), +ymd.slice(4, 6) - 1, +ymd.slice(6, 8)))
+const toYmd = (date) => date.toISOString().slice(0, 10).replace(/-/g, '')
+export const ymdToIso = (ymd) => `${ymd.slice(0, 4)}-${ymd.slice(4, 6)}-${ymd.slice(6, 8)}`
+
+/** Split a YYYYMMDD range into two halves (null when it is already a single day). */
+export function splitRange(fromYmd, toYmdValue) {
+  const from = toDate(fromYmd), to = toDate(toYmdValue)
+  const days = Math.round((to - from) / 86_400_000)
+  if (days < 1) return null
+  const mid = new Date(from.getTime() + Math.floor(days / 2) * 86_400_000)
+  return [
+    { fromDate: fromYmd, toDate: toYmd(mid) },
+    { fromDate: toYmd(new Date(mid.getTime() + 86_400_000)), toDate: toYmdValue },
+  ]
 }
 
 /**

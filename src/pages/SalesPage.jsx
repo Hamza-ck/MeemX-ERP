@@ -12,15 +12,18 @@ import Nav from '../components/Nav'
 import InvoicePrintModal from '../components/InvoicePrintModal'
 import AdminEditModal from '../components/AdminEditModal'
 import SalesBarChart from '../components/SalesBarChart'
+import { useAuth } from '../context/AuthContext'
 import { accDb } from '../lib/accountingDb'
 import { calculateSalesMetrics } from '../lib/dashboardMetrics'
 
 export default function SalesPage() {
+  const { isAdmin } = useAuth()
   const navigate = useNavigate()
   const [selectedInvoice, setSelectedInvoice] = useState(null)
   const [editingInvoice, setEditingInvoice] = useState(null)
   const [search, setSearch] = useState('')
   const [invoices, setInvoices] = useState([])
+  const [allSalesVouchers, setAllSalesVouchers] = useState([])
 
   // Format date helper for invoice cards
   const formatInvoiceDate = (dateStr) => {
@@ -34,18 +37,25 @@ export default function SalesPage() {
     }
   }
 
-  // Derive the 7-day summary from the same local-calendar metric helper as the dashboard.
-  const { sales7Days, sales7DaysTotal } = useMemo(() => calculateSalesMetrics(invoices), [invoices])
+  // Derive the 7-day summary from the same local-calendar metric helper as the dashboard (including credit notes).
+  const { sales7Days, sales7DaysTotal } = useMemo(
+    () => calculateSalesMetrics(allSalesVouchers),
+    [allSalesVouchers]
+  )
   const formatChartMoney = (amount) => `₹${Number(amount || 0).toLocaleString('en-IN')}`
 
   // Load live invoices from Dexie DB
   const loadInvoices = useCallback(async () => {
     try {
-      const dbVouchers = await accDb.vouchers
-        .where('voucher_type')
-        .equals('sales')
-        .reverse()
-        .sortBy('id')
+      const allVouchers = await accDb.vouchers.toArray()
+      const salesAndReturns = allVouchers.filter(
+        (v) => v.voucher_type === 'sales' || v.voucher_type === 'credit_note'
+      )
+      setAllSalesVouchers(salesAndReturns)
+
+      const dbVouchers = allVouchers
+        .filter((v) => v.voucher_type === 'sales')
+        .sort((a, b) => (Number(b.id) || 0) - (Number(a.id) || 0))
 
       if (dbVouchers && dbVouchers.length > 0) {
         const mapped = dbVouchers.map((v) => {
@@ -66,6 +76,7 @@ export default function SalesPage() {
     } catch (err) {
       console.warn('Error fetching invoices from Dexie:', err)
       setInvoices([])
+      setAllSalesVouchers([])
     }
   }, [])
 
@@ -98,7 +109,7 @@ export default function SalesPage() {
       <Nav />
 
       <main className="mx-auto max-w-2xl px-4 pt-4 sm:px-6 sm:pt-6">
-        {/* Top Header with Back button and "+ New invoice" button (PDF Page 3) */}
+        {/* Top Header with Back button and Tally import button (PDF Page 3) */}
         <header className="mb-4 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <button
@@ -114,15 +125,17 @@ export default function SalesPage() {
             </h1>
           </div>
 
-          <button
-            type="button"
-            onClick={() => navigate('/tally')}
-            className="flex items-center gap-1.5 rounded-2xl bg-[#0e655d] px-3.5 py-2 text-xs font-extrabold text-white shadow-xs hover:bg-[#0a4f49] transition active:scale-95"
-            title="Import vouchers directly from Tally XML / Excel"
-          >
-            <FileSpreadsheet size={16} strokeWidth={2.5} />
-            <span>Tally import</span>
-          </button>
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={() => navigate('/tally')}
+              className="flex items-center gap-1.5 rounded-2xl bg-[#0e655d] px-3.5 py-2 text-xs font-extrabold text-white shadow-xs hover:bg-[#0a4f49] transition active:scale-95"
+              title="Import vouchers directly from Tally XML / Excel"
+            >
+              <FileSpreadsheet size={16} strokeWidth={2.5} />
+              <span>Tally import</span>
+            </button>
+          )}
         </header>
 
         {/* 7 Days Performance & Bar Chart (PDF Page 3) */}
@@ -205,17 +218,19 @@ export default function SalesPage() {
                   </div>
 
                   {/* Admin Edit button */}
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      setEditingInvoice(inv)
-                    }}
-                    className="grid h-10 w-10 place-items-center rounded-2xl bg-[#f0f9f5] border border-[#0e655d]/20 text-[#0e655d] hover:bg-[#e3f4ee] transition active:scale-95"
-                    title="Admin edit invoice details"
-                  >
-                    <Edit3 size={16} strokeWidth={2.5} />
-                  </button>
+                  {isAdmin && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setEditingInvoice(inv)
+                      }}
+                      className="grid h-10 w-10 place-items-center rounded-2xl bg-[#f0f9f5] border border-[#0e655d]/20 text-[#0e655d] hover:bg-[#e3f4ee] transition active:scale-95"
+                      title="Admin edit invoice details"
+                    >
+                      <Edit3 size={16} strokeWidth={2.5} />
+                    </button>
+                  )}
 
                   {/* Solid teal square download/arrow button matching PDF */}
                   <button

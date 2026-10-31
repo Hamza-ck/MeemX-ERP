@@ -420,3 +420,66 @@ describe('sync service', () => {
     assert.equal(cloud.upserts.length, 1)
   })
 })
+
+describe('live sync', () => {
+  const baseSnapshot = (version) => ({
+    accounting_refresh_state: { data: { last_data_change_at: version }, error: null },
+    parties: { data: [], error: null }, ledgers: { data: [], error: null },
+    materials: { data: [], error: null },
+    vouchers: { data: [{ id: 'v-1', voucher_no: 'Sales-1', voucher_type: 'sales', date: '2026-10-30', amount: 10 }], error: null },
+  })
+  const build = (database, cloud) => createSyncService({ cloud, database, isConfigured: true, dispatchUpdates: () => {}, logError: () => {} })
+
+  it('a poll is a no-op when nothing changed, and re-reads as soon as the Tally connector commits', async () => {
+    const database = new MemoryDatabase(emptyTables(), [{ key: 'pending_cloud_deletes', value: '[]' }])
+    const cloud = mockCloud({ snapshot: baseSnapshot('t1'), role: 'owner' })
+    const service = build(database, cloud)
+
+    assert.equal((await service.syncFromSupabase({ onlyIfChanged: true })).skipped, undefined)   // first time: full read
+    assert.equal(database.table('vouchers').rows.length, 1)
+
+    assert.equal((await service.syncFromSupabase({ onlyIfChanged: true })).skipped, true)        // nothing new
+
+    cloud.snapshot = {
+      ...baseSnapshot('t2'),
+      vouchers: { data: [
+        { id: 'v-1', voucher_no: 'Sales-1', voucher_type: 'sales', date: '2026-10-30', amount: 10 },
+        { id: 'v-2', voucher_no: 'Sales-2', voucher_type: 'sales', date: '2026-10-31', amount: 99 },
+      ], error: null },
+    }
+    const result = await service.syncFromSupabase({ onlyIfChanged: true })
+    assert.equal(result.skipped, undefined)
+    assert.equal(database.table('vouchers').rows.length, 2)
+  })
+
+  it('vouchers tombstoned in the cloud (deleted in Tally) disappear from the device', async () => {
+    const database = new MemoryDatabase({
+      ...emptyTables(),
+      vouchers: [{ id: 1, cloud_id: 'v-1', voucher_no: 'Sales-1', local_dirty: false }],
+    }, [{ key: 'pending_cloud_deletes', value: '[]' }])
+    const cloud = mockCloud({ snapshot: { ...baseSnapshot('t3'), vouchers: { data: [{ id: 'v-1', voucher_no: 'Sales-1', deleted_at: '2026-10-31T00:00:00Z' }], error: null } } })
+    await build(database, cloud).syncFromSupabase()
+    assert.equal(database.table('vouchers').rows.length, 0)
+  })
+
+  it('adopts an identical never-synced local row instead of creating a duplicate', () => {
+    const result = buildEntitySnapshot(
+      [{ id: 7, voucher_no: 'Sales-1', local_dirty: false }],
+      [{ id: 'v-1', voucher_no: 'Sales-1' }],
+      (row) => ({ voucher_no: row.voucher_no }), new Set(), new Set(),
+      (row) => String(row.voucher_no).toLowerCase(),
+    )
+    assert.deepEqual(result.upserts, [{ voucher_no: 'Sales-1', id: 7, cloud_id: 'v-1', local_dirty: false }])
+  })
+
+  it('non-admin devices follow the admin\'s owner-permission and layout settings', async () => {
+    const database = new MemoryDatabase(emptyTables(), [{ key: 'owner_permissions', value: '{"sales":true}' }])
+    const cloud = mockCloud({ role: 'owner', snapshot: {
+      ...baseSnapshot('t4'),
+      app_settings: { data: [{ key: 'owner_permissions', value: { sales: false, profit: false } }, { key: 'card_order', value: ['debtors', 'sales'] }], error: null },
+    } })
+    await build(database, cloud).syncFromSupabase()
+    assert.equal((await database.settings.get('owner_permissions')).value, '{"sales":false,"profit":false}')
+    assert.equal((await database.settings.get('card_order')).value, '["debtors","sales"]')
+  })
+})

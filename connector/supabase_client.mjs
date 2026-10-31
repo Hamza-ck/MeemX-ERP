@@ -84,7 +84,7 @@ export async function callEdgeFunction(config, accessToken, payload, fetchFn = g
         signal: AbortSignal.timeout(300000), // 5 min timeout for large database commits
       })
 
-      const body = await res.json()
+      const body = await res.json().catch(() => ({ error: `non-JSON response (HTTP ${res.status})` }))
       if (!res.ok) {
         throw new EdgeFunctionError(
           `Edge function error (${res.status}): ${body.error || JSON.stringify(body)}`,
@@ -125,8 +125,9 @@ export async function previewAndCommit(config, accessToken, previewPayload, fetc
     throw new Error('Preview did not return a jobId. Response: ' + JSON.stringify(preview))
   }
 
-  // If no valid rows, skip commit
-  if (preview.summary && preview.summary.valid === 0) {
+  // If no valid rows, skip commit — unless a sync window is attached: an empty window still
+  // has to be committed so vouchers deleted in Tally are tombstoned.
+  if (preview.summary && preview.summary.valid === 0 && !previewPayload.window) {
     return {
       preview,
       commit: { status: 'skipped', inserted: 0, skipped: preview.summary.total, jobId: preview.jobId },
@@ -134,12 +135,17 @@ export async function previewAndCommit(config, accessToken, previewPayload, fetc
   }
 
   // Step 2: Commit
-  const commit = await callEdgeFunction(
-    config,
-    accessToken,
-    { action: 'commit', jobId: preview.jobId },
-    fetchFn
-  )
+  let commit
+  try {
+    commit = await callEdgeFunction(config, accessToken, { action: 'commit', jobId: preview.jobId }, fetchFn)
+  } catch (err) {
+    // A network timeout after the server finished makes the retry see a committed job.
+    if (err instanceof EdgeFunctionError && /not ready to commit/i.test(err.message)) {
+      commit = { status: 'committed', inserted: 0, updated: 0, skipped: 0, jobId: preview.jobId, alreadyCommitted: true }
+    } else {
+      throw err
+    }
+  }
 
   return { preview, commit }
 }
@@ -163,7 +169,8 @@ export async function getLastSyncDate(config, accessToken, fetchFn = globalThis.
     },
   })
 
-  if (!res.ok) return null
+  // A failed read must not look like "never synced": callers fall back to a wider window and warn.
+  if (!res.ok) throw new Error(`Could not read sync cursor (HTTP ${res.status})`)
 
   const rows = await res.json()
   if (!rows.length || !rows[0].last_successful_import_at) return null
@@ -206,7 +213,7 @@ export async function setLastSyncDate(config, accessToken, jobId, maxVoucherDate
       'Authorization': `Bearer ${accessToken}`,
       'apikey': config.anonKey,
       'Content-Type': 'application/json',
-      'Prefer': 'return=minimal',
+      'Prefer': 'return=representation',
     },
     body: JSON.stringify(body),
   })
