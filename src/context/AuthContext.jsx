@@ -44,75 +44,12 @@ async function isolateLocalDataForUser(userId, role) {
 }
 
 const DEFAULT_USERS = []
-
-/**
- * Hash a 4-digit PIN using PBKDF2-SHA-256 (100,000 iterations).
- * Stored as { salt, hash } in hex strings.
- */
-async function hashPin(pin, saltHex = null) {
-  const enc = new TextEncoder()
-  const salt = saltHex
-    ? Uint8Array.from(saltHex.match(/.{1,2}/g).map((byte) => parseInt(byte, 16)))
-    : crypto.getRandomValues(new Uint8Array(16))
-  const keyMaterial = await crypto.subtle.importKey(
-    'raw',
-    enc.encode(String(pin)),
-    { name: 'PBKDF2' },
-    false,
-    ['deriveBits']
-  )
-  const derivedBits = await crypto.subtle.deriveBits(
-    {
-      name: 'PBKDF2',
-      salt,
-      iterations: 100000,
-      hash: 'SHA-256',
-    },
-    keyMaterial,
-    256
-  )
-  const hashHex = Array.from(new Uint8Array(derivedBits))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('')
-  const outSaltHex = Array.from(salt)
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('')
-  return { salt: outSaltHex, hash: hashHex }
-}
-
-function parsePinRecord(val) {
-  if (!val) return null
-  if (typeof val === 'object' && val.salt && val.hash) return val
-  if (typeof val === 'string') {
-    try {
-      const p = JSON.parse(val)
-      if (p && p.salt && p.hash) return p
-    } catch { }
-  }
-  return null
-}
-
-async function verifyPin(enteredPin, stored) {
-  if (!stored) return false
-  const record = parsePinRecord(stored)
-  if (record) {
-    const computed = await hashPin(enteredPin, record.salt)
-    if (computed.hash.length !== record.hash.length) return false
-    let diff = 0
-    for (let i = 0; i < record.hash.length; i++) {
-      diff |= record.hash.charCodeAt(i) ^ computed.hash.charCodeAt(i)
-    }
-    return diff === 0
-  }
-  // Plaintext fallback for pre-migration
-  return String(stored) === String(enteredPin)
-}
+const DEFAULT_PINS = new Set(['1234', '8888'])
 
 export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true)
   const [cloudSyncStatus, setCloudSyncStatus] = useState('idle')
   const [cloudSyncError, setCloudSyncError] = useState('')
-  const [blockedSyncState, setBlockedSyncState] = useState(null)
   const [sessionUser, setSessionUser] = useState(null)
   const [isPinUnlocked, setIsPinUnlocked] = useState(false)
   const [currentRole, setCurrentRole] = useState('')
@@ -140,53 +77,28 @@ export function AuthProvider({ children }) {
     const sName = settings.find((s) => s.key === 'shop_name')?.value
     if (sName) setShopName(sName)
 
-    const oPinRaw = settings.find((s) => s.key === 'owner_pin')?.value || ''
-    let loadedOwnerPin = ''
-    if (oPinRaw) {
-      const parsed = parsePinRecord(oPinRaw)
-      if (parsed) {
-        loadedOwnerPin = JSON.stringify(parsed)
-      } else if (/^\d{4}$/.test(String(oPinRaw))) {
-        // Plaintext PIN - migrate once on first load
-        const hashed = await hashPin(oPinRaw)
-        loadedOwnerPin = JSON.stringify(hashed)
-        await accDb.settings.put({ key: 'owner_pin', value: loadedOwnerPin })
-      }
-    }
-    setOwnerPin(loadedOwnerPin)
+    const oPin = settings.find((s) => s.key === 'owner_pin')?.value || ''
+    const safeOwnerPin = oPin === '1234' ? '' : oPin
+    setOwnerPin(safeOwnerPin)
+    if (oPin === '1234') await accDb.settings.put({ key: 'owner_pin', value: '' })
 
-    const aPinRaw = settings.find((s) => s.key === 'admin_pin')?.value || ''
-    let loadedAdminPin = ''
-    if (aPinRaw) {
-      const parsed = parsePinRecord(aPinRaw)
-      if (parsed) {
-        loadedAdminPin = JSON.stringify(parsed)
-      } else if (/^\d{4}$/.test(String(aPinRaw))) {
-        // Plaintext PIN - migrate once on first load
-        const hashed = await hashPin(aPinRaw)
-        loadedAdminPin = JSON.stringify(hashed)
-        await accDb.settings.put({ key: 'admin_pin', value: loadedAdminPin })
-      }
-    }
-    setAdminPin(loadedAdminPin)
+    const aPin = settings.find((s) => s.key === 'admin_pin')?.value || ''
+    const safeAdminPin = aPin === '8888' ? '' : aPin
+    setAdminPin(safeAdminPin)
+    if (aPin === '8888') await accDb.settings.put({ key: 'admin_pin', value: '' })
 
     const savedUsers = settings.find((s) => s.key === 'team_users')?.value
     if (savedUsers) {
       try {
         const parsed = JSON.parse(savedUsers)
         if (Array.isArray(parsed)) {
-          let needsSave = false
-          const migratedUsers = await Promise.all(parsed.map(async (user) => {
-            if (user.pin && typeof user.pin === 'string' && /^\d{4}$/.test(user.pin)) {
-              needsSave = true
-              const hashed = await hashPin(user.pin)
-              return { ...user, pin: hashed }
-            }
-            return user
-          }))
-          setTeamUsers(migratedUsers)
-          if (needsSave) {
-            await accDb.settings.put({ key: 'team_users', value: JSON.stringify(migratedUsers) })
+          const filteredUsers = parsed.filter((user) => !(
+            (user.id === 'user-owner-1' && String(user.pin) === '1234') ||
+            (user.id === 'user-admin-1' && String(user.pin) === '8888')
+          ))
+          setTeamUsers(filteredUsers)
+          if (filteredUsers.length !== parsed.length) {
+            await accDb.settings.put({ key: 'team_users', value: JSON.stringify(filteredUsers) })
           }
         }
       } catch { }
@@ -256,7 +168,7 @@ export function AuthProvider({ children }) {
     let savedUserPins = []
     try { savedUserPins = JSON.parse(savedUsers?.value || '[]').map((localUser) => localUser.pin) } catch { }
     const hasLocalPin = [...savedUserPins, savedOwnerPin?.value, savedAdminPin?.value]
-      .some((pin) => Boolean(parsePinRecord(pin) || /^\d{4}$/.test(String(pin || ''))))
+      .some((pin) => /^\d{4}$/.test(String(pin || '')) && !DEFAULT_PINS.has(String(pin)))
     const shouldUnlock = unlock || !hasLocalPin
     setIsPinUnlocked(shouldUnlock)
     localStorage.setItem('tallyflow_locked', shouldUnlock ? 'false' : 'true')
@@ -321,20 +233,10 @@ export function AuthProvider({ children }) {
         return result
       }
 
-      if (result.pushResult?.reason === 'role_not_permitted' || result.reason === 'role_not_permitted') {
-        const skipped = result.skipped || result.pushResult?.skipped || 0
-        setBlockedSyncState({ reason: 'role_not_permitted', skipped })
-      } else {
-        setBlockedSyncState(null)
-      }
-
       const dirtyCounts = await Promise.all(['parties', 'ledgers', 'materials', 'vouchers'].map(async (tableName) =>
         (await accDb.table(tableName).filter((row) => row.local_dirty).toArray()).length
       ))
       const hasPendingChanges = dirtyCounts.some((count) => count > 0)
-      if (!hasPendingChanges) {
-        setBlockedSyncState(null)
-      }
       setCloudSyncStatus(hasPendingChanges ? 'pending' : 'synced')
       return result
     } catch (error) {
@@ -362,22 +264,6 @@ export function AuthProvider({ children }) {
     setCurrentRole((previous) => (previous === profile.role ? previous : profile.role))
     if (profile.full_name) setActiveUserName(profile.full_name)
     localStorage.setItem('tallyflow_verified_profile', JSON.stringify({ id: sessionUserId, role: profile.role, full_name: profile.full_name || '' }))
-  }, [sessionUserId])
-
-  // Real-time role propagation (Step 5)
-  useEffect(() => {
-    if (!sessionUserId) return
-    const channel = supabase
-      .channel(`profile-${sessionUserId}`)
-      .on('postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'profiles',
-          filter: `id=eq.${sessionUserId}` },
-        (p) => {
-          const r = p.new?.role
-          if (['admin', 'owner', 'employee'].includes(r)) setCurrentRole(r)
-        })
-      .subscribe()
-    return () => supabase.removeChannel(channel)
   }, [sessionUserId])
 
   useEffect(() => {
@@ -453,22 +339,13 @@ export function AuthProvider({ children }) {
     return { success: true }
   }
 
-  const unlockWithPin = async (enteredPin) => {
+  const unlockWithPin = (enteredPin) => {
     if (!sessionUser) return { success: false, error: 'Sign in to your account first.' }
     const cleanPin = String(enteredPin).trim()
-    if (!/^\d{4}$/.test(cleanPin)) {
-      return { success: false, error: 'Incorrect 4-digit PIN.' }
-    }
 
-    const pinCandidates = [ownerPin, adminPin, ...teamUsers.map((user) => user.pin)].filter(Boolean)
-    let matched = false
-    for (const candidate of pinCandidates) {
-      if (await verifyPin(cleanPin, candidate)) {
-        matched = true
-        break
-      }
-    }
-    if (!matched) {
+    const knownPins = [...teamUsers.map((user) => user.pin), ownerPin, adminPin]
+      .filter((pin) => /^\d{4}$/.test(String(pin || '')) && !DEFAULT_PINS.has(String(pin)))
+    if (!knownPins.some((pin) => String(pin).trim() === cleanPin)) {
       return { success: false, error: 'Incorrect 4-digit PIN.' }
     }
 
@@ -515,33 +392,23 @@ export function AuthProvider({ children }) {
   const updatePins = async ({ newOwnerPin, newAdminPin }) => {
     let updatedUsers = [...teamUsers]
     if (newOwnerPin !== undefined) {
-      if (newOwnerPin !== '' && !/^\d{4}$/.test(newOwnerPin)) {
-        throw new Error('Choose a 4-digit device PIN.')
+      if (newOwnerPin !== '' && (!/^\d{4}$/.test(newOwnerPin) || DEFAULT_PINS.has(newOwnerPin))) {
+        throw new Error('Choose a 4-digit device PIN other than 1234 or 8888.')
       }
-      let hashedOwner = ''
-      if (newOwnerPin !== '') {
-        const hashed = await hashPin(newOwnerPin)
-        hashedOwner = JSON.stringify(hashed)
-      }
-      setOwnerPin(hashedOwner)
-      await accDb.settings.put({ key: 'owner_pin', value: hashedOwner })
+      setOwnerPin(newOwnerPin)
+      await accDb.settings.put({ key: 'owner_pin', value: newOwnerPin })
       updatedUsers = updatedUsers.map((u) =>
-        u.id === 'user-owner-1' ? { ...u, pin: hashedOwner ? JSON.parse(hashedOwner) : '' } : u
+        u.id === 'user-owner-1' ? { ...u, pin: newOwnerPin } : u
       )
     }
     if (newAdminPin !== undefined) {
-      if (newAdminPin !== '' && !/^\d{4}$/.test(newAdminPin)) {
-        throw new Error('Choose a 4-digit device PIN.')
+      if (newAdminPin !== '' && (!/^\d{4}$/.test(newAdminPin) || DEFAULT_PINS.has(newAdminPin))) {
+        throw new Error('Choose a 4-digit device PIN other than 1234 or 8888.')
       }
-      let hashedAdmin = ''
-      if (newAdminPin !== '') {
-        const hashed = await hashPin(newAdminPin)
-        hashedAdmin = JSON.stringify(hashed)
-      }
-      setAdminPin(hashedAdmin)
-      await accDb.settings.put({ key: 'admin_pin', value: hashedAdmin })
+      setAdminPin(newAdminPin)
+      await accDb.settings.put({ key: 'admin_pin', value: newAdminPin })
       updatedUsers = updatedUsers.map((u) =>
-        u.id === 'user-admin-1' ? { ...u, pin: hashedAdmin ? JSON.parse(hashedAdmin) : '' } : u
+        u.id === 'user-admin-1' ? { ...u, pin: newAdminPin } : u
       )
     }
     setTeamUsers(updatedUsers)
@@ -550,17 +417,10 @@ export function AuthProvider({ children }) {
   }
 
   const saveTeamUser = async (userData) => {
-    const cleanRole = ['admin', 'owner', 'employee'].includes(userData.role) ? userData.role : 'owner'
-    const roleLabel = cleanRole === 'admin' ? 'Admin' : cleanRole === 'employee' ? 'Employee · view only' : 'Owner · view only'
-    const rawPin = String(userData.pin || '').trim().slice(0, 4)
-    let pinRecord = null
-    if (rawPin && /^\d{4}$/.test(rawPin)) {
-      pinRecord = await hashPin(rawPin)
-    } else if (cleanRole === 'admin' && adminPin) {
-      pinRecord = parsePinRecord(adminPin)
-    } else if (ownerPin) {
-      pinRecord = parsePinRecord(ownerPin)
-    }
+    const cleanRole = userData.role === 'admin' ? 'admin' : 'owner'
+    const roleLabel = cleanRole === 'admin' ? 'Admin' : 'Owner · view only'
+    const pin = String(userData.pin || (cleanRole === 'admin' ? adminPin : ownerPin)).slice(0, 4)
+    if (DEFAULT_PINS.has(pin)) throw new Error('Choose a PIN other than 1234 or 8888.')
 
     let nextUsers
     const exists = teamUsers.some((u) => u.id === userData.id)
@@ -573,7 +433,7 @@ export function AuthProvider({ children }) {
             phone: (userData.phone || '').trim(),
             role: cleanRole,
             roleLabel,
-            pin: pinRecord || u.pin,
+            pin,
           }
           : u
       )
@@ -584,7 +444,7 @@ export function AuthProvider({ children }) {
         phone: (userData.phone || '').trim(),
         role: cleanRole,
         roleLabel,
-        pin: pinRecord,
+        pin,
         lastSeen: 'Added just now',
       }
       nextUsers = [...teamUsers, newUser]
@@ -668,7 +528,6 @@ export function AuthProvider({ children }) {
     loading,
     cloudSyncStatus,
     cloudSyncError,
-    blockedSyncState,
     shopName,
     ownerPin,
     adminPin,

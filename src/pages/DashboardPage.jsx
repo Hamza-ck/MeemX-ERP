@@ -12,7 +12,6 @@ import {
 import { useAuth } from '../context/AuthContext'
 import { accDb } from '../lib/accountingDb'
 import { calculateDashboardMetrics, computeDebtorAging } from '../lib/dashboardMetrics'
-import { supabase, supabaseConfigured } from '../lib/supabaseClient'
 import SalesBarChart from '../components/SalesBarChart'
 import Nav from '../components/Nav'
 
@@ -32,20 +31,17 @@ export default function DashboardPage() {
   const [remindSent, setRemindSent] = useState(null)
   const [liveMetrics, setLiveMetrics] = useState(null)
   const [liveDebtors, setLiveDebtors] = useState(null)
-  const [isSyncStale, setIsSyncStale] = useState(false)
   const [lastUpdatedLabel, setLastUpdatedLabel] = useState('Live local books')
   const navigate = useNavigate()
 
   // Format currency in Indian standard Lakhs/Crores
   const formatMoney = (val, compact = true) => {
     const num = Number(val) || 0
-    const sign = num < 0 ? '-' : ''
-    const abs = Math.abs(num)
     if (compact) {
-      if (abs >= 10000000) return `${sign}₹${(abs / 10000000).toFixed(1)}Cr`
-      if (abs >= 100000) return `${sign}₹${(abs / 100000).toFixed(1)}L`
-      if (abs >= 1000) return `${sign}₹${(abs / 1000).toFixed(1)}K`
-      return `${sign}₹${abs}`
+      if (Math.abs(num) >= 10000000) return `₹${(num / 10000000).toFixed(1)}Cr`
+      if (Math.abs(num) >= 100000) return `₹${(num / 100000).toFixed(1)}L`
+      if (Math.abs(num) >= 1000) return `₹${(num / 1000).toFixed(1)}K`
+      return `₹${num}`
     }
     return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(num)
   }
@@ -73,32 +69,33 @@ export default function DashboardPage() {
             )
           }
         }
+        if (!active) return
 
         const debtors = parties.filter((p) => p.type === 'debtor')
         const creditors = parties.filter((p) => p.type === 'creditor')
 
-        const { totalOwed: debtorsSum, enrichedDebtors } = computeDebtorAging(debtors, vouchers)
-        const creditorsSum = creditors.reduce((s, c) => s + (Number(c.current_balance) || 0), 0)
-        let missingValuation = 0
+        // Only positive balances are money owed. A negative balance is an advance on the other
+        // side and must not silently cancel out other parties' dues.
+        const owing = (list) => list.filter((p) => (Number(p.current_balance) || 0) > 0)
+        const debtorsSum = owing(debtors).reduce((s, d) => s + Number(d.current_balance), 0)
+        const creditorsSum = owing(creditors).reduce((s, c) => s + Number(c.current_balance), 0)
         const stockSum = materials.reduce((sum, material) => {
           if (material.current_value != null && Number.isFinite(Number(material.current_value))) {
             return sum + Number(material.current_value)
           }
-          const fallback = (Number(material.current_qty) || 0) * (Number(material.purchase_rate) || 0)
-          if (fallback !== 0) return sum + fallback
-          missingValuation += 1
-          return sum
+          return sum + (Number(material.current_qty) || 0) * (Number(material.purchase_rate) || 0)
         }, 0)
 
         const loansOwed = ledgers
-          .filter((l) => (l.group || '').toLowerCase().includes('loans (liability)'))
-          .reduce((s, l) => s + (Number(l.current_balance) || 0), 0)
+          .filter((l) => !l.deleted_at && l.category === 'liability' && /loan|overdraft|bank od/i.test(`${l.primary_group || ''} ${l.group || ''}`))
+          .reduce((s, l) => s + Math.max(0, Number(l.current_balance) || 0), 0)
         const advGiven = ledgers
           .filter((l) => (l.group || '').toLowerCase().includes('loans & advances (asset)'))
           .reduce((s, l) => s + (Number(l.current_balance) || 0), 0)
 
         // Keep dashboard date totals in one pass through voucher history.
-        const calculated = calculateDashboardMetrics(vouchers, ledgers, new Date(), materials)
+        const calculated = calculateDashboardMetrics(vouchers, ledgers, new Date(), { materials, parties })
+        const aging = computeDebtorAging(parties, vouchers)
         const {
           salesToday, salesWeek, salesMonth, salesPrevMonth,
           expensesToday, expensesWeek, expensesMonth, expensesPrevMonth,
@@ -112,11 +109,10 @@ export default function DashboardPage() {
 
         setLiveMetrics({
           debtorsSum,
-          debtorsCount: debtors.length,
+          debtorsCount: owing(debtors).length,
           creditorsSum,
-          creditorsCount: creditors.length,
+          creditorsCount: owing(creditors).length,
           stockSum,
-          missingValuation,
           netLoans: Math.max(0, loansOwed - advGiven),
           salesToday,
           salesWeek,
@@ -139,20 +135,20 @@ export default function DashboardPage() {
           prevMonthFullName,
         })
 
-        const topDebtors = enrichedDebtors
+        const topDebtors = debtors
           .filter((d) => (Number(d.current_balance) || 0) > 0)
           .sort((a, b) => (Number(b.current_balance) || 0) - (Number(a.current_balance) || 0))
           .slice(0, 5)
           .map((d) => {
-            const age = d.age_bucket || '0–30d'
+            const bucket = aging.byParty.get(d.id ?? d.name)?.bucket || '0–30d'
             return {
               name: d.name,
-              age,
+              age: bucket,
               ageTone:
-                age === '60d+'
+                bucket === '60d+'
                   ? 'bg-[#fcebe6] text-[#ba3e29]'
-                  : age === '31–60d'
-                  ? 'bg-[#e2f3ec] text-[#0d786d]'
+                  : bucket === '31–60d'
+                  ? 'bg-[#fdf1dc] text-[#9a6412]'
                   : 'bg-[#e3f2ec] text-[#136b60]',
               amount: `₹${(Number(d.current_balance) || 0).toLocaleString('en-IN')}`,
               phone: d.phone || '',
@@ -174,35 +170,6 @@ export default function DashboardPage() {
     }
   }, [])
 
-  // Check Tally daily sync health (> 36 h staleness check)
-  useEffect(() => {
-    let active = true
-
-    async function checkSyncHealth() {
-      if (!supabaseConfigured) return
-      try {
-        const { data, error } = await supabase
-          .from('accounting_refresh_state')
-          .select('last_successful_import_at')
-          .eq('id', 1)
-          .maybeSingle()
-
-        if (!active || error || !data?.last_successful_import_at) return
-        const lastSyncTime = new Date(data.last_successful_import_at).getTime()
-        const now = Date.now()
-        const diffHours = (now - lastSyncTime) / (1000 * 60 * 60)
-        setIsSyncStale(diffHours > 36)
-      } catch {
-        /* best effort */
-      }
-    }
-
-    checkSyncHealth()
-    return () => {
-      active = false
-    }
-  }, [])
-
   // Metrics dynamically derived from live DB records
   const metrics = useMemo(() => {
     const debtorsVal = formatMoney(liveMetrics?.debtorsSum || 0)
@@ -210,9 +177,6 @@ export default function DashboardPage() {
     const creditorsVal = formatMoney(liveMetrics?.creditorsSum || 0)
     const creditorsDetail = `You owe · ${liveMetrics?.creditorsCount || 0}`
     const stockVal = formatMoney(liveMetrics?.stockSum || 0)
-    const stockNote = (liveMetrics?.missingValuation || 0) > 0
-      ? `${liveMetrics.missingValuation} stock items missing valuation.`
-      : null
     const loansVal = formatMoney(liveMetrics?.netLoans || 0)
 
     if (period === 'Today') {
@@ -225,7 +189,7 @@ export default function DashboardPage() {
         expenses: { value: formatMoney(eVal), diff: eVal > 0 ? 'Today expenses' : 'No expenses', isPositive: false },
         debtors: { value: debtorsVal, detail: debtorsDetail },
         creditors: { value: creditorsVal, detail: creditorsDetail },
-        inventory: { value: stockVal, detail: 'Stock value', note: stockNote },
+        inventory: { value: stockVal, detail: 'Stock value' },
         loans: { value: loansVal, detail: 'Net balance' },
       }
     } else if (period === 'Week') {
@@ -238,7 +202,7 @@ export default function DashboardPage() {
         expenses: { value: formatMoney(eVal), diff: eVal > 0 ? 'Weekly expenses' : 'No expenses', isPositive: false },
         debtors: { value: debtorsVal, detail: debtorsDetail },
         creditors: { value: creditorsVal, detail: creditorsDetail },
-        inventory: { value: stockVal, detail: 'Stock value', note: stockNote },
+        inventory: { value: stockVal, detail: 'Stock value' },
         loans: { value: loansVal, detail: 'Net balance' },
       }
     } else if (period === 'Last month') {
@@ -248,11 +212,11 @@ export default function DashboardPage() {
       const prevName = liveMetrics?.prevMonthFullName || 'Last month'
       return {
         sales: { value: formatMoney(sVal), diff: `${prevName} total`, isPositive: true },
-        profit: { value: pVal == null ? '—' : formatMoney(pVal), diff: pVal == null ? 'Profit details incomplete' : liveMetrics?.operatingResultBasis?.prevMonth || 'Sales less item costs & expenses', isPositive: pVal != null && pVal >= 0 },
+        profit: { value: pVal == null ? '—' : formatMoney(pVal), diff: pVal == null ? 'Profit details incomplete' : liveMetrics?.operatingResultBasis?.lastMonth || 'Sales less item costs & expenses', isPositive: pVal != null && pVal >= 0 },
         expenses: { value: formatMoney(eVal), diff: `${prevName} expenses`, isPositive: false },
         debtors: { value: debtorsVal, detail: debtorsDetail },
         creditors: { value: creditorsVal, detail: creditorsDetail },
-        inventory: { value: stockVal, detail: 'Stock value', note: stockNote },
+        inventory: { value: stockVal, detail: 'Stock value' },
         loans: { value: loansVal, detail: 'Net balance' },
       }
     } else {
@@ -295,7 +259,7 @@ export default function DashboardPage() {
         },
         debtors: { value: debtorsVal, detail: debtorsDetail },
         creditors: { value: creditorsVal, detail: creditorsDetail },
-        inventory: { value: stockVal, detail: 'Stock value', note: stockNote },
+        inventory: { value: stockVal, detail: 'Stock value' },
         loans: { value: loansVal, detail: 'Net balance' },
       }
     }
@@ -420,7 +384,6 @@ export default function DashboardPage() {
       to: '/inventory',
       value: metrics.inventory.value,
       detail: metrics.inventory.detail,
-      note: metrics.inventory.note,
       accent: 'border-l-4 border-l-[#0b3832]',
     },
     loans: {
@@ -551,17 +514,6 @@ export default function DashboardPage() {
             </button>
           ))}
         </div>
-
-        {/* ================= TALLY STALE SYNC BANNER (Step 13) ================= */}
-        {isSyncStale && (
-          <div
-            data-testid="stale-sync-banner"
-            className="mb-4 flex items-center gap-2.5 rounded-2xl border border-amber-300 bg-amber-50 p-3.5 text-xs font-semibold text-amber-900 shadow-xs"
-          >
-            <span className="text-base leading-none">⚠️</span>
-            <span>Tally sync is stale (&gt; 36 h). Check that the daily scheduled task is running.</span>
-          </div>
-        )}
 
         {/* ================= EDIT LAYOUT BANNER (PDF Page 13 Desktop & Page 15 Mobile) ================= */}
         {isAdmin && editLayout && (
@@ -796,11 +748,6 @@ export default function DashboardPage() {
                     </span>
                   )}
                 </div>
-                {card.note && (
-                  <div className="mt-1 text-[11px] font-medium text-[#7a938c]">
-                    {card.note}
-                  </div>
-                )}
               </div>
             )
           })}
@@ -815,7 +762,7 @@ export default function DashboardPage() {
                 <h3 className="text-sm font-extrabold text-[#143d35]">
                   Sales, last 7 days
                 </h3>
-                <span className="text-xs text-[#718b82]">Daily revenue trend</span>
+      <span className="text-xs text-[#718b82]">Daily revenue trend</span>
               </div>
               <strong className="text-base font-extrabold text-[#0e655d]">
                 {formatMoney(sales7DaysTotal)}
@@ -880,14 +827,12 @@ export default function DashboardPage() {
                   <p className="mt-1 text-[11px] text-[#78968d]">
                     Import customer accounts &amp; vouchers from Tally to see aging receivables.
                   </p>
-                  {isAdmin && (
-                    <Link
-                      to="/tally"
-                      className="mt-3 inline-flex items-center gap-1.5 rounded-xl bg-[#0e655d] px-3.5 py-1.5 text-xs font-extrabold text-white no-underline shadow-xs hover:bg-[#0a4f49]"
-                    >
-                      Import from Tally
-                    </Link>
-                  )}
+                  <Link
+                    to="/tally"
+                    className="mt-3 inline-flex items-center gap-1.5 rounded-xl bg-[#0e655d] px-3.5 py-1.5 text-xs font-extrabold text-white no-underline shadow-xs hover:bg-[#0a4f49]"
+                  >
+                    Import from Tally
+                  </Link>
                 </div>
               )}
             </div>

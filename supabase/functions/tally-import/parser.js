@@ -1,65 +1,153 @@
 /**
- * Pure, testable Tally XML parser shared by the Supabase Edge Function and Node unit tests.
+ * Pure Tally XML → staged-row parser.
+ *
+ * Kept free of Deno/npm: imports so it can be unit-tested in Node. The edge
+ * function injects fast-xml-parser (`deps`) and DB-derived context (`options`).
+ *
+ * Sign convention used by Tally's XML export (and relied on below):
+ *   - Debit  amounts are NEGATIVE, credit amounts are POSITIVE.
+ *   - Ledger balances therefore also arrive Dr = negative, Cr = positive.
+ *
+ * Stored convention (what the rest of the app sees):
+ *   - Ledger / party balances are "natural": positive = the balance sits on the
+ *     ledger's normal side (assets & expenses: Dr, liabilities & income: Cr).
+ *     A negative value means the opposite side (bank overdraft, customer advance).
+ *   - Voucher ledger_entries keep magnitude + an explicit is_debit flag.
  */
 
-export const val = (value) => String(value ?? '').replace(/[\u0000-\u001f]/g, '').trim()
+export const asArray = (value) => (value == null ? [] : Array.isArray(value) ? value : [value])
 
-export const num = (value) => {
-  const cleaned = val(value).replace(/,/g, '')
-  const match = cleaned.match(/[+-]?\d+(?:\.\d+)?/)
-  const parsed = match ? Number(match[0]) : 0
+export const val = (value) => {
+  if (value == null) return ''
+  if (typeof value === 'object') return '#text' in value ? String(value['#text'] ?? '').trim() : ''
+  return String(value).trim()
+}
+
+const NUMBER_RE = /[+-]?(?:\d+(?:\.\d*)?|\.\d+)/
+
+/** First number in the text, magnitude only (quantities, rates). "10 Nos" → 10. */
+export const magnitude = (value) => {
+  const raw = val(value)
+  if (!raw) return 0
+  const match = raw.replace(/,/g, '').match(NUMBER_RE)
+  if (!match) return 0
+  const parsed = Math.abs(Number(match[0]))
   return Number.isFinite(parsed) ? parsed : 0
 }
 
 /**
- * Parse a signed Tally amount.
- * In Tally XML:
- *  - Debit entries/balances are negative (or have ISDEEMEDPOSITIVE="Yes", trailing "Dr", or parentheses "(200.00)").
- *  - Credit entries/balances are positive (or have ISDEEMEDPOSITIVE="No" or trailing "Cr").
+ * Signed amount in Tally's convention (Dr negative, Cr positive).
+ * Understands plain signed numbers, "(1,234.00)", and "1,234.00 Dr/Cr" suffixes.
  */
-export function signedAmount(value, isDeemedPositive = null) {
-  const raw = val(value).replace(/,/g, '')
+export const signedAmount = (value) => {
+  const raw = val(value)
   if (!raw) return 0
-  const isParen = /^\s*\(.*\)\s*$/.test(raw)
-  const match = raw.match(/([+-])?\s*\d+(?:\.\d+)?/)
+  const cleaned = raw.replace(/,/g, '')
+  const match = cleaned.match(NUMBER_RE)
   if (!match) return 0
-  const magnitude = Math.abs(Number(match[0].replace(/\s+/g, '')))
-  if (!Number.isFinite(magnitude) || magnitude === 0) return 0
-
-  const hasMinus = isParen || match[1] === '-' || /^\s*-/.test(raw)
-  const hasDr = /\bdr\.?\s*$/i.test(raw)
-  const hasCr = /\bcr\.?\s*$/i.test(raw)
-  const deemedYes = typeof isDeemedPositive === 'string' && /^yes$/i.test(isDeemedPositive.trim())
-  const deemedNo = typeof isDeemedPositive === 'string' && /^no$/i.test(isDeemedPositive.trim())
-
-  if (hasMinus || hasDr) return -magnitude
-  if (hasCr) return magnitude
-  if (deemedYes) return -magnitude
-  if (deemedNo) return magnitude
-  return magnitude
+  let parsed = Number(match[0])
+  if (!Number.isFinite(parsed)) return 0
+  if (/\bDr\.?\s*$/i.test(cleaned)) parsed = -Math.abs(parsed)
+  else if (/\bCr\.?\s*$/i.test(cleaned)) parsed = Math.abs(parsed)
+  else if (/^\(.*\)$/.test(cleaned.trim())) parsed = -Math.abs(parsed)
+  return parsed
 }
 
-/**
- * Convert a Tally signed balance (negative = Debit, positive = Credit) into the natural
- * balance convention of its category:
- *  - asset / expense: normal balance is Debit -> multiply by -1 (so Debit is + and Credit is -)
- *  - liability / income: normal balance is Credit -> multiply by +1 (so Credit is + and Debit is -)
- */
-export function normalBalanceSign(category) {
-  return category === 'liability' || category === 'income' ? 1 : -1
+export const maybeSigned = (value) => (val(value) === '' ? null : signedAmount(value))
+
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+const validIsoDate = (value) => {
+  const [year, month, day] = value.split('-').map(Number)
+  const date = new Date(Date.UTC(year, month - 1, day))
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
 }
 
 export const normalDate = (value) => {
-  const raw = val(value)
-  if (/^\d{8}$/.test(raw)) return `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`
-  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw
-  const dmy = raw.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/)
-  if (dmy) return `${dmy[3]}-${dmy[2].padStart(2, '0')}-${dmy[1].padStart(2, '0')}`
-  const parsed = new Date(raw)
-  return Number.isNaN(parsed.getTime()) ? '' : parsed.toISOString().slice(0, 10)
+  const raw = value instanceof Date ? value.toISOString().slice(0, 10) : val(value)
+  if (/^\d{8}$/.test(raw)) {
+    const iso = `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`
+    return validIsoDate(iso) ? iso : ''
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return validIsoDate(raw) ? raw : ''
+  if (/^\d{1,2}[-/]\d{1,2}[-/]\d{4}$/.test(raw)) {
+    const parts = raw.split(/[-/]/)
+    const iso = `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`
+    return validIsoDate(iso) ? iso : ''
+  }
+  const named = raw.match(/^(\d{1,2})[-\s]([A-Za-z]{3})[A-Za-z]*[-\s,]*(\d{4})$/)
+  if (named) {
+    const month = MONTHS.indexOf(named[2].toLowerCase()) + 1
+    if (month > 0) {
+      const iso = `${named[3]}-${String(month).padStart(2, '0')}-${named[1].padStart(2, '0')}`
+      return validIsoDate(iso) ? iso : ''
+    }
+  }
+  return ''
 }
 
-const normalized = (value) => val(value).toLowerCase()
+export const digest = async (input) => {
+  const bytes = typeof input === 'string' ? new TextEncoder().encode(input) : input
+  const hash = await crypto.subtle.digest('SHA-256', bytes)
+  return Array.from(new Uint8Array(hash)).map((byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+export const collectNamed = (object, wanted, output = []) => {
+  if (!object || typeof object !== 'object') return output
+  if (Array.isArray(object)) { for (const item of object) collectNamed(item, wanted, output); return output }
+  for (const [key, child] of Object.entries(object)) {
+    if (key.toUpperCase() === wanted.toUpperCase()) output.push(...asArray(child))
+    if (child && typeof child === 'object') collectNamed(child, wanted, output)
+  }
+  return output
+}
+
+export const first = (object, keys) => {
+  for (const key of keys) if (object?.[key] != null && val(object[key]) !== '') return object[key]
+  return ''
+}
+
+const isYes = (value) => /^yes$/i.test(val(value))
+
+// ─── Voucher types ───────────────────────────────────────────────────────────
+
+/** Types that never touch the books (orders, delivery/receipt notes, memos, stock-only vouchers). */
+const NON_ACCOUNTING = /(order|delivery note|receipt note|rejection|stock journal|physical stock|material (in|out)|memorandum|reversing journal|job work|manufacturing)/i
+
+/**
+ * Classify a Tally voucher-type name.
+ * Returns { type, ignore }. `ignore` = valid Tally voucher that must not be imported.
+ * `type` is '' (and ignore false) when the name is unrecognised → staged as an error.
+ */
+export function classifyVoucherType(name) {
+  const type = val(name).toLowerCase()
+  if (!type) return { type: '', ignore: false }
+  if (NON_ACCOUNTING.test(type)) return { type: '', ignore: true }
+  if (/credit note|sales return/.test(type)) return { type: 'credit_note', ignore: false }
+  if (/debit note|purchase return/.test(type)) return { type: 'debit_note', ignore: false }
+  if (type.includes('sale')) return { type: 'sales', ignore: false }
+  if (type.includes('purchase')) return { type: 'purchase', ignore: false }
+  if (type.includes('receipt')) return { type: 'receipt', ignore: false }
+  if (type.includes('payment')) return { type: 'payment', ignore: false }
+  if (type.includes('contra')) return { type: 'contra', ignore: false }
+  if (type.includes('journal')) return { type: 'journal', ignore: false }
+  return { type: '', ignore: false }
+}
+
+// ─── Account groups ──────────────────────────────────────────────────────────
+
+const clean = (text) => val(text).replace(/[\u0000-\u001f]/g, '').trim()
+
+/** Walk a group up to its primary (reserved) group using a {name: parent} map. */
+export function resolveRootGroup(group, groupParents = {}) {
+  const lookup = new Map(Object.entries(groupParents).map(([name, parent]) => [clean(name).toLowerCase(), clean(parent)]))
+  let current = clean(group)
+  for (let hops = 0; hops < 25; hops += 1) {
+    const parent = lookup.get(current.toLowerCase())
+    if (!parent || /^primary$/i.test(parent) || parent.toLowerCase() === current.toLowerCase()) return current
+    current = parent
+  }
+  return current
+}
 
 const EXACT_CATEGORY = new Map([
   ['direct expenses', 'expense'], ['indirect expenses', 'expense'], ['purchase accounts', 'expense'],
@@ -74,8 +162,9 @@ const EXACT_CATEGORY = new Map([
   ['branch / divisions', 'asset'], ['suspense a/c', 'asset'],
 ])
 
+/** Mirror of src/lib/tallyLedgerCategory.js — a test keeps the two identical. */
 export function categoryForGroup(group) {
-  const name = normalized(group)
+  const name = clean(group).toLowerCase()
   if (EXACT_CATEGORY.has(name)) return EXACT_CATEGORY.get(name)
   if (name.includes('expense') || name.includes('purchase account')) return 'expense'
   if (name.includes('income') || name.includes('sales account')) return 'income'
@@ -84,496 +173,188 @@ export function categoryForGroup(group) {
   return 'asset'
 }
 
-export const ledgerCategory = categoryForGroup
-
-export function partyType(group) {
-  const name = normalized(group)
+export const partyTypeForGroup = (rootGroup) => {
+  const name = clean(rootGroup).toLowerCase()
   if (name === 'sundry debtors' || name.includes('debtor') || name.includes('customer')) return 'debtor'
   if (name === 'sundry creditors' || name.includes('creditor') || name.includes('supplier')) return 'creditor'
   return ''
 }
 
-/**
- * Walk the exported group hierarchy (`child -> parent`) up to a reserved Tally primary group.
- */
-export function resolveRootGroup(group, groupParents = {}) {
-  let current = val(group)
-  if (!current) return ''
-  const lookup = new Map(
-    Object.entries(groupParents || {}).map(([k, v]) => [normalized(k), val(v)])
-  )
-  const visited = new Set()
-  while (current && !visited.has(normalized(current))) {
-    const key = normalized(current)
-    visited.add(key)
-    if (EXACT_CATEGORY.has(key)) return current
-    const parent = lookup.get(key)
-    if (!parent || normalized(parent) === 'primary' || normalized(parent) === ' primary') break
-    current = parent
-  }
-  return current
+/** Dr-normal categories store balance = -tallyValue; Cr-normal store +tallyValue. */
+const naturalBalance = (tallyValue, category) =>
+  tallyValue === null ? null : (category === 'asset' || category === 'expense' ? -tallyValue : tallyValue)
+
+// ─── Vouchers ────────────────────────────────────────────────────────────────
+
+const CASH_NAME = /^(counter\s+)?cash(\s+(in\s+hand|a\/c|account|sales?))?$|^petty\s+cash$/i
+
+function voucherLines(voucher) {
+  // Tally can expose the same posting under both ALLLEDGERENTRIES.LIST and
+  // LEDGERENTRIES.LIST. Never union them: that double-counts every posting.
+  const allLedger = asArray(voucher['ALLLEDGERENTRIES.LIST'])
+  const ledgerList = allLedger.length ? allLedger : asArray(voucher['LEDGERENTRIES.LIST'])
+  const allInventory = asArray(voucher['ALLINVENTORYENTRIES.LIST'])
+  const inventoryEntries = allInventory.length ? allInventory : asArray(voucher['INVENTORYENTRIES.LIST'])
+  const allocations = inventoryEntries.flatMap((item) => asArray(item['ACCOUNTINGALLOCATIONS.LIST']))
+  return { ledgerList: [...ledgerList, ...allocations], inventoryEntries }
 }
 
-export const resolvePrimaryGroup = resolveRootGroup
+export async function buildVoucherPayload(voucher, company, { cashLedgerNames = new Set() } = {}) {
+  const classification = classifyVoucherType(first(voucher, ['@_VCHTYPE', 'VOUCHERTYPENAME', 'VOUCHERTYPE']))
+  const { ledgerList, inventoryEntries } = voucherLines(voucher)
 
-const NON_ACCOUNTING_PATTERNS = [
-  /\bsales\s+order\b/i,
-  /\bpurchase\s+order\b/i,
-  /\bjob\s+work\b/i,
-  /\bdelivery\s+note\b/i,
-  /\breceipt\s+note\b/i,
-  /\brejections?\s+in\b/i,
-  /\brejections?\s+out\b/i,
-  /\bstock\s+journal\b/i,
-  /\bphysical\s+stock\b/i,
-  /\bmaterial\s+in\b/i,
-  /\bmaterial\s+out\b/i,
-  /\bmemorandum\b/i,
-  /\breversing\s+journal\b/i,
-  /\bpayroll\b/i,
-  /\battendance\b/i,
-]
-
-/**
- * Deterministic voucher type classifier.
- * Avoids naive substring matching (e.g. "Sales Order" -> sales, "Receipt Note" -> receipt).
- */
-export function classifyVoucherType(raw) {
-  const text = normalized(raw).replace(/\s+/g, ' ')
-  if (!text) return { type: '', ignore: false }
-
-  for (const pattern of NON_ACCOUNTING_PATTERNS) {
-    if (pattern.test(text)) {
-      return { type: '', ignore: true }
-    }
-  }
-
-  if (/\bcredit\s*note\b|\bsales\s*return\b|^cr\s*note\b/.test(text)) {
-    return { type: 'credit_note', ignore: false }
-  }
-  if (/\bdebit\s*note\b|\bpurchase\s*return\b|^dr\s*note\b/.test(text)) {
-    return { type: 'debit_note', ignore: false }
-  }
-  if (/\bcontra\b/.test(text)) {
-    return { type: 'contra', ignore: false }
-  }
-  if (/\bjournal\b/.test(text)) {
-    return { type: 'journal', ignore: false }
-  }
-  if (/\breceipt\b|^rcpt\b/.test(text)) {
-    return { type: 'receipt', ignore: false }
-  }
-  if (/\bpayment\b|^pymt\b/.test(text)) {
-    return { type: 'payment', ignore: false }
-  }
-  if (/\bsales\b|\bsale\b|\btax\s*invoice\b|\bretail\s*invoice\b|\bpos\s*invoice\b/.test(text)) {
-    return { type: 'sales', ignore: false }
-  }
-  if (/\bpurchase\b|\bpurchases\b/.test(text)) {
-    return { type: 'purchase', ignore: false }
-  }
-
-  return { type: '', ignore: false }
-}
-
-export async function digest(text) {
-  const bytes = new TextEncoder().encode(text)
-  const hash = await crypto.subtle.digest('SHA-256', bytes)
-  return Array.from(new Uint8Array(hash)).map((b) => b.toString(16).padStart(2, '0')).join('')
-}
-
-const asArray = (value) => (Array.isArray(value) ? value : value ? [value] : [])
-
-function walk(node, key, out = []) {
-  if (!node || typeof node !== 'object') return out
-  for (const [k, v] of Object.entries(node)) {
-    if (k.toUpperCase() === key) out.push(...asArray(v))
-    if (v && typeof v === 'object') walk(v, key, out)
-  }
-  return out
-}
-
-const EXACT_CASH_NAMES = new Set(['cash', 'cash-in-hand', 'cash in hand', 'petty cash'])
-
-function isCashOrBankName(name, cashLedgerNames = new Set()) {
-  const lower = normalized(name)
-  if (!lower) return false
-  if (EXACT_CASH_NAMES.has(lower)) return true
-  if (cashLedgerNames && cashLedgerNames.has(lower)) return true
-  return false
-}
-
-function extractLedgerEntries(voucher) {
-  // Prefer ALLLEDGERENTRIES.LIST if present so we do not double-count when Tally exports both
-  const allEntries = asArray(voucher['ALLLEDGERENTRIES.LIST'])
-  const plainEntries = asArray(voucher['LEDGERENTRIES.LIST'])
-  const rawEntries = allEntries.length > 0 ? allEntries : plainEntries
-
-  const out = []
-  for (const entry of rawEntries) {
-    if (!entry || typeof entry !== 'object') continue
-    const ledgerName = val(entry.LEDGERNAME ?? entry['@_NAME'])
-    const signed = signedAmount(entry.AMOUNT, entry.ISDEEMEDPOSITIVE)
-    if (!ledgerName && signed === 0) continue
-    const isDebit = signed < 0
-    out.push({
-      ledger_name: ledgerName,
+  const ledgerEntries = ledgerList.map((entry) => {
+    const signed = signedAmount(entry.AMOUNT)
+    return {
+      ledger_name: val(first(entry, ['LEDGERNAME'])),
       amount: Math.abs(signed),
-      signed_amount: signed,
-      is_debit: isDebit,
-      entry_type: isDebit ? 'debit' : 'credit',
-      is_party_ledger: /^yes$/i.test(val(entry.ISPARTYLEDGER)),
-    })
+      // The sign is authoritative; ISDEEMEDPOSITIVE only breaks ties on zero lines.
+      is_debit: signed !== 0 ? signed < 0 : isYes(entry.ISDEEMEDPOSITIVE),
+      signed,
+    }
+  }).filter((entry) => entry.ledger_name && entry.amount > 0)
+
+  const items = inventoryEntries.map((item) => ({
+    name: val(first(item, ['STOCKITEMNAME', 'NAME'])),
+    qty: magnitude(first(item, ['BILLEDQTY', 'ACTUALQTY'])),
+    rate: magnitude(item.RATE),
+    amount: Math.abs(signedAmount(item.AMOUNT)),
+  })).filter((item) => item.name)
+
+  const partyName = val(first(voucher, ['PARTYLEDGERNAME', 'PARTYNAME'])) || 'Cash'
+  const partyKey = partyName.toLowerCase()
+  const isCashParty = CASH_NAME.test(partyName) || cashLedgerNames.has(partyKey)
+  const type = classification.type
+
+  const debitTotal = ledgerEntries.filter((e) => e.is_debit).reduce((s, e) => s + e.amount, 0)
+  const creditTotal = ledgerEntries.filter((e) => !e.is_debit).reduce((s, e) => s + e.amount, 0)
+  const inventoryTotal = items.reduce((s, i) => s + i.amount, 0)
+  // A balanced voucher has debits == credits; the larger side is the voucher value
+  // (guards against partially exported postings). Item totals are only a last resort
+  // because discounts/taxes make them differ from what the party actually owes.
+  const amount = Math.max(debitTotal, creditTotal) || Math.abs(signedAmount(first(voucher, ['AMOUNT']))) || inventoryTotal
+
+  const partyNet = ledgerEntries.filter((e) => e.ledger_name.toLowerCase() === partyKey).reduce((s, e) => s + e.signed, 0)
+  const hasPostings = ledgerEntries.length > 0
+  let due = 0
+  if (type === 'sales' && !isCashParty) {
+    due = hasPostings ? (partyNet < 0 ? Math.min(amount, -partyNet) : 0) : amount
+  } else if (type === 'purchase' && !isCashParty) {
+    due = hasPostings ? (partyNet > 0 ? Math.min(amount, partyNet) : 0) : amount
   }
-  return out
+  const paid = type === 'sales' || type === 'purchase' ? Math.max(0, amount - due)
+    : type === 'receipt' || type === 'payment' ? amount : 0
+
+  const payload = {
+    voucher_no: val(first(voucher, ['VOUCHERNUMBER', 'VOUCHERNO', 'MASTERID'])),
+    voucher_type: type,
+    date: normalDate(first(voucher, ['DATE', 'EFFECTIVEDATE'])),
+    party_name: partyName,
+    party_uid: '',
+    amount, paid_amount: paid, due_amount: due,
+    payment_mode: 'Tally import',
+    items,
+    ledger_entries: ledgerEntries.map(({ signed: _signed, ...entry }) => entry),
+    narration: val(voucher.NARRATION),
+    reference_no: val(first(voucher, ['REFERENCE', 'REFERENCEID'])),
+    source_voucher_guid: val(first(voucher, ['GUID', 'MASTERID'])),
+    source_company: company || 'default',
+    source_system: 'tally',
+  }
+  payload.source_hash = await digest(JSON.stringify(payload))
+  return payload
 }
 
-function extractInventoryItems(voucher) {
-  const topLevel = [
-    ...asArray(voucher['ALLINVENTORYENTRIES.LIST']),
-    ...asArray(voucher['INVENTORYENTRIES.LIST']),
-    ...asArray(voucher['INVENTORYENTRIESIN.LIST']),
-    ...asArray(voucher['INVENTORYENTRIESOUT.LIST']),
-  ]
-  const nested = [
-    ...asArray(voucher['ALLLEDGERENTRIES.LIST']),
-    ...asArray(voucher['LEDGERENTRIES.LIST']),
-  ].flatMap((entry) => [
-    ...asArray(entry?.['INVENTORYALLOCATIONS.LIST']),
-    ...asArray(entry?.['ALLINVENTORYENTRIES.LIST']),
-  ])
-
-  const sourceList = topLevel.length > 0 ? topLevel : nested
-  return sourceList
-    .map((item) => {
-      if (!item || typeof item !== 'object') return null
-      const name = val(item.STOCKITEMNAME)
-      if (!name) return null
-      const rawQty = val(item.BILLEDQTY || item.ACTUALQTY)
-      const qty = Math.abs(num(rawQty))
-      const rate = Math.abs(num(item.RATE))
-      const amount = Math.abs(signedAmount(item.AMOUNT, item.ISDEEMEDPOSITIVE)) || (qty * rate)
-      return {
-        name,
-        sku: val(item.STOCKITEMNAME),
-        qty,
-        rate,
-        amount,
-      }
-    })
-    .filter((item) => item && item.name)
-}
+// ─── Document ────────────────────────────────────────────────────────────────
 
 /**
- * Parse Tally XML into normalized master and voucher staging rows.
+ * @param {string} text   Tally XML
+ * @param {string} company
+ * @param {{XMLParser: any, XMLValidator: any}} deps
+ * @param {{groupParents?: Record<string,string>, cashLedgerNames?: Set<string>}} [options]
+ * @returns {Promise<{rows: Array, ignored: {nonAccounting: number, cancelled: number, optional: number}}>}
  */
-export async function parseTallyXml(
-  xml,
-  company = '',
-  { XMLParser, XMLValidator },
-  { groupParents = {}, cashLedgerNames = new Set() } = {},
-) {
-  const valid = XMLValidator.validate(xml)
-  if (valid !== true) throw new Error('Invalid Tally XML: ' + (valid.err?.msg || 'syntax error'))
-
-  const parser = new XMLParser({
-    ignoreAttributes: false,
-    attributeNamePrefix: '@_',
-    trimValues: true,
-    parseTagValue: false,
-  })
-  const doc = parser.parse(xml)
+export async function parseTallyXml(text, company, deps, options = {}) {
+  const { XMLParser, XMLValidator } = deps
+  const groupParents = options.groupParents || {}
+  const validation = XMLValidator.validate(text)
+  if (validation !== true) throw new Error('Invalid XML: ' + (validation.err?.msg || 'document validation failed'))
+  const parsed = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_', parseTagValue: false, trimValues: true }).parse(text)
   const rows = []
   const ignored = { nonAccounting: 0, cancelled: 0, optional: 0 }
 
-  // Collect any GROUP definitions present in the same XML payload
-  const mergedGroupParents = { ...groupParents }
-  for (const grp of walk(doc, 'GROUP')) {
-    const gName = val(grp.NAME ?? grp['@_NAME'] ?? grp['NAME.LIST']?.NAME)
-    const gParent = val(grp.PARENT)
-    if (gName && gParent) mergedGroupParents[gName] = gParent
+  for (const voucher of collectNamed(parsed, 'VOUCHER')) {
+    if (isYes(voucher.ISCANCELLED)) { ignored.cancelled += 1; continue }
+    if (isYes(voucher.ISOPTIONAL)) { ignored.optional += 1; continue }
+    const kind = classifyVoucherType(first(voucher, ['@_VCHTYPE', 'VOUCHERTYPENAME', 'VOUCHERTYPE']))
+    if (kind.ignore) { ignored.nonAccounting += 1; continue }
+    rows.push({ rowType: 'voucher', payload: await buildVoucherPayload(voucher, company, options) })
   }
 
-  const knownCashLedgers = new Set(
-    Array.from(cashLedgerNames || []).map((n) => normalized(n))
-  )
-
-  for (const ledger of walk(doc, 'LEDGER')) {
-    const rawName = ledger['NAME.LIST']?.NAME ?? ledger.NAME ?? ledger['@_NAME']
-    const name = val(Array.isArray(rawName) ? rawName[0] : rawName)
+  for (const ledger of collectNamed(parsed, 'LEDGER')) {
+    const name = val(first(ledger, ['@_NAME', 'NAME']))
     if (!name) continue
-
-    const group = val(ledger.PARENT || 'General')
-    const primaryGroup = resolveRootGroup(group, mergedGroupParents) || group
-    const category = categoryForGroup(primaryGroup)
-    const sign = normalBalanceSign(category)
-
-    const rawOpening = ledger.OPENINGBALANCE
-    const rawClosing = ledger.CLOSINGBALANCE
-    const opening = rawOpening !== undefined && val(rawOpening) !== ''
-      ? signedAmount(rawOpening) * sign
-      : 0
-    const closing = rawClosing !== undefined && val(rawClosing) !== ''
-      ? signedAmount(rawClosing) * sign
-      : opening
-
-    const normPrimary = normalized(primaryGroup)
-    if (['cash-in-hand', 'bank accounts', 'bank od a/c'].includes(normPrimary)) {
-      knownCashLedgers.add(normalized(name))
+    const group = val(first(ledger, ['PARENT'])) || 'General'
+    const rootGroup = resolveRootGroup(group, groupParents)
+    const category = categoryForGroup(rootGroup)
+    const opening = maybeSigned(first(ledger, ['OPENINGBALANCE']))
+    const closing = maybeSigned(first(ledger, ['CLOSINGBALANCE']))
+    const openingNatural = naturalBalance(opening, category) ?? 0
+    const closingNatural = naturalBalance(closing, category)
+    const type = partyTypeForGroup(rootGroup)
+    const payload = {
+      name, group, primary_group: rootGroup, category,
+      opening_balance: openingNatural,
+      current_balance: closingNatural ?? openingNatural,
+      closing_balance: closingNatural,
+      phone: val(first(ledger, ['LEDGERPHONE', 'PHONE'])), email: val(first(ledger, ['EMAIL'])), address: val(first(ledger, ['ADDRESS'])),
     }
-
-    const pType = partyType(primaryGroup) || partyType(group)
-    if (pType) {
-      rows.push({
-        rowType: 'party',
-        reference: name,
-        sourceKey: `party:${company}:${name.toLowerCase()}`,
-        payload: {
-          name,
-          type: pType,
-          group,
-          primary_group: primaryGroup,
-          phone: val(ledger.LEDGERPHONE || ledger.LEDGERMOBILE || ledger.PHONE),
-          email: val(ledger.EMAIL),
-          address: asArray(ledger['ADDRESS.LIST']?.ADDRESS).map(val).filter(Boolean).join(', '),
-          opening_balance: opening,
-          closing_balance: closing,
-          current_balance: closing,
-        },
-      })
-    } else {
-      rows.push({
-        rowType: 'ledger',
-        reference: name,
-        sourceKey: `ledger:${company}:${name.toLowerCase()}`,
-        payload: {
-          name,
-          group,
-          primary_group: primaryGroup,
-          category,
-          opening_balance: opening,
-          closing_balance: closing,
-          current_balance: closing,
-        },
-      })
-    }
+    rows.push({ rowType: type ? 'party' : 'ledger', payload: type ? { ...payload, type } : payload })
   }
 
-  for (const item of walk(doc, 'STOCKITEM')) {
-    const rawName = item['NAME.LIST']?.NAME ?? item.NAME ?? item['@_NAME']
-    const name = val(Array.isArray(rawName) ? rawName[0] : rawName)
+  const skuFor = async (name) => 'TALLY-' + (await digest(name.toLowerCase())).slice(0, 12).toUpperCase()
+
+  for (const stock of collectNamed(parsed, 'STOCKITEM')) {
+    const name = val(first(stock, ['@_NAME', 'NAME']))
     if (!name) continue
-
-    const parseSignedQty = (rawVal) => {
-      const cleaned = val(rawVal).replace(/,/g, '')
-      const m = cleaned.match(/[+-]?\d+(?:\.\d+)?/)
-      return m ? Number(m[0]) : 0
-    }
-
-    const openingQty = parseSignedQty(item.OPENINGBALANCE)
-    const hasClosingQty = item.CLOSINGBALANCE !== undefined && val(item.CLOSINGBALANCE) !== ''
-    const closingQty = hasClosingQty ? parseSignedQty(item.CLOSINGBALANCE) : openingQty
-    const openingValue = signedAmount(item.OPENINGVALUE)
-    const hasClosingValue = item.CLOSINGVALUE !== undefined && val(item.CLOSINGVALUE) !== ''
-    const closingValue = hasClosingValue ? signedAmount(item.CLOSINGVALUE) : openingValue
-    const rate = Math.abs(num(item.CLOSINGRATE || item.OPENINGRATE || item.STANDARDCOST || item.STANDARDRATE)) ||
-      (closingQty !== 0 && closingValue ? Math.abs(closingValue / closingQty) : 0)
-
-    rows.push({
-      rowType: 'stock_item',
-      reference: name,
-      sourceKey: `stock:${company}:${name.toLowerCase()}`,
-      payload: {
-        name,
-        sku: val(item.PARTNO || item.ALIAS || name),
-        category: val(item.PARENT || 'General'),
-        unit: val(item.BASEUNITS || 'pcs') || 'pcs',
-        opening_qty: openingQty,
-        current_qty: closingQty,
-        purchase_rate: rate,
-        sales_rate: Math.abs(num(item.STANDARDRATE)) || rate,
-        current_value: closingValue || (closingQty * rate),
-      },
-    })
+    const closingQty = maybeSigned(first(stock, ['CLOSINGBALANCE']))
+    const openingQty = maybeSigned(first(stock, ['OPENINGBALANCE']))
+    const closingValue = maybeSigned(first(stock, ['CLOSINGVALUE']))
+    const closingRate = val(first(stock, ['CLOSINGRATE'])) === '' ? null : magnitude(first(stock, ['CLOSINGRATE']))
+    const openingRate = val(first(stock, ['OPENINGRATE'])) === '' ? null : magnitude(first(stock, ['OPENINGRATE']))
+    const salesRate = val(first(stock, ['BASESELLPRICE', 'SALEPRICE'])) === '' ? null : magnitude(first(stock, ['BASESELLPRICE', 'SALEPRICE']))
+    const currentQty = closingQty ?? openingQty
+    rows.push({ rowType: 'stock_item', payload: {
+      name, sku: await skuFor(name),
+      category: val(first(stock, ['PARENT'])) || 'General', unit: val(first(stock, ['BASEUNITS'])) || 'pcs',
+      // Tally allows negative stock; keep the sign so oversold items are not shown as healthy.
+      ...(currentQty !== null ? { current_qty: currentQty } : {}),
+      ...(closingValue !== null ? { current_value: closingValue } : {}),
+      ...(closingRate !== null || openingRate !== null ? { purchase_rate: closingRate ?? openingRate } : {}),
+      ...(salesRate !== null ? { sales_rate: salesRate } : {}),
+    } })
   }
 
-  // Stock Summary report (DSPACCNAME + DSPSTKINFO pairs)
-  const envelope = doc?.ENVELOPE || doc
-  const dspNames = asArray(envelope?.DSPACCNAME)
-  const dspInfos = asArray(envelope?.DSPSTKINFO)
-  const pairCount = Math.min(dspNames.length, dspInfos.length)
-  for (let i = 0; i < pairCount; i++) {
-    const name = val(dspNames[i]?.DSPDISPNAME)
+  // Item-wise Stock Summary: live quantity / average rate / value.
+  const summaryNames = collectNamed(parsed, 'DSPACCNAME')
+  const summaryInfo = collectNamed(parsed, 'DSPSTKINFO')
+  for (let index = 0; index < Math.min(summaryNames.length, summaryInfo.length); index += 1) {
+    const name = val(first(summaryNames[index], ['DSPDISPNAME']))
     if (!name) continue
-    const stkCl = dspInfos[i]?.DSPSTKCL || {}
-    const rawQty = val(stkCl.DSPCLQTY)
-    const m = rawQty.replace(/,/g, '').match(/[+-]?\d+(?:\.\d+)?/)
-    const qty = m ? Number(m[0]) : 0
-    const rate = Math.abs(num(stkCl.DSPCLRATE))
-    const rawAmt = signedAmount(stkCl.DSPCLAMTA)
-    const value = rawAmt !== 0 ? Math.abs(rawAmt) : qty * rate
-
-    rows.push({
-      rowType: 'stock_item',
-      reference: name,
-      sourceKey: `stock:${company}:${name.toLowerCase()}`,
-      payload: {
-        name,
-        sku: name,
-        current_qty: qty,
-        purchase_rate: rate,
-        current_value: value,
-        from_stock_summary: true,
-      },
-    })
-  }
-
-  for (const voucher of walk(doc, 'VOUCHER')) {
-    if (/^yes$/i.test(val(voucher.ISCANCELLED))) {
-      ignored.cancelled++
-      continue
-    }
-    if (/^yes$/i.test(val(voucher.ISOPTIONAL))) {
-      ignored.optional++
-      continue
-    }
-
-    const rawVoucherType = val(voucher.VOUCHERTYPENAME || voucher['@_VCHTYPE'])
-    const classified = classifyVoucherType(rawVoucherType)
-    if (classified.ignore) {
-      ignored.nonAccounting++
-      continue
-    }
-
-    const voucherType = classified.type
-    const date = normalDate(voucher.DATE || voucher.EFFECTIVEDATE)
-    const guid = val(voucher.GUID || voucher.REMOTEID || voucher.MASTERID)
-    const rawNo = val(voucher.VOUCHERNUMBER)
-    const voucherNo = rawNo || (guid ? `TALLY-${guid.slice(-8)}` : '')
-
-    const ledgerEntries = extractLedgerEntries(voucher)
-    const items = extractInventoryItems(voucher)
-
-    const totalDebit = ledgerEntries
-      .filter((e) => e.is_debit)
-      .reduce((sum, e) => sum + e.amount, 0)
-    const totalCredit = ledgerEntries
-      .filter((e) => !e.is_debit)
-      .reduce((sum, e) => sum + e.amount, 0)
-    const itemsSum = items.reduce((sum, it) => sum + (Number(it.amount) || 0), 0)
-
-    let partyName = val(voucher.PARTYLEDGERNAME || voucher.PARTYNAME)
-    if (!partyName && ledgerEntries.length > 0) {
-      const partyEntry = ledgerEntries.find((e) => e.is_party_ledger) || ledgerEntries[0]
-      partyName = partyEntry?.ledger_name || 'Cash'
-    }
-    if (!partyName) partyName = 'Cash'
-
-    const partyIsCashOrBank = isCashOrBankName(partyName, knownCashLedgers)
-    const partyDebited = ledgerEntries
-      .filter((e) => normalized(e.ledger_name) === normalized(partyName) && e.is_debit)
-      .reduce((sum, e) => sum + e.amount, 0)
-    const partyCredited = ledgerEntries
-      .filter((e) => normalized(e.ledger_name) === normalized(partyName) && !e.is_debit)
-      .reduce((sum, e) => sum + e.amount, 0)
-
-    let amount = Math.abs(signedAmount(voucher.AMOUNT))
-    if (!amount) {
-      if (voucherType === 'sales' || voucherType === 'credit_note') {
-        amount = Math.max(totalDebit, totalCredit, itemsSum)
-      } else if (voucherType === 'purchase' || voucherType === 'debit_note') {
-        amount = Math.max(totalCredit, totalDebit, itemsSum)
-      } else {
-        amount = totalDebit || totalCredit || itemsSum
-      }
-    }
-
-    let paidAmount = amount
-    let dueAmount = 0
-    let paymentMode = 'Tally import'
-
-    const cashEntries = ledgerEntries.filter((e) => isCashOrBankName(e.ledger_name, knownCashLedgers))
-
-    if (voucherType === 'sales') {
-      if (partyIsCashOrBank) {
-        paidAmount = amount
-        dueAmount = 0
-        paymentMode = partyName
-      } else {
-        dueAmount = partyDebited > 0 ? Math.min(amount, partyDebited) : amount
-        paidAmount = Math.max(0, amount - dueAmount)
-        paymentMode = cashEntries[0]?.ledger_name || 'Tally import'
-      }
-    } else if (voucherType === 'purchase') {
-      if (partyIsCashOrBank) {
-        paidAmount = amount
-        dueAmount = 0
-        paymentMode = partyName
-      } else {
-        dueAmount = partyCredited > 0 ? Math.min(amount, partyCredited) : amount
-        paidAmount = Math.max(0, amount - dueAmount)
-        paymentMode = cashEntries[0]?.ledger_name || 'Tally import'
-      }
-    } else if (voucherType === 'payment' || voucherType === 'receipt') {
-      paidAmount = amount
-      dueAmount = 0
-      paymentMode = cashEntries[0]?.ledger_name || 'Tally import'
-      if (partyIsCashOrBank) {
-        const nonCash = ledgerEntries.find((e) => !isCashOrBankName(e.ledger_name, knownCashLedgers))
-        if (nonCash?.ledger_name) partyName = nonCash.ledger_name
-      }
-    } else {
-      paidAmount = amount
-      dueAmount = 0
-      paymentMode = cashEntries[0]?.ledger_name || 'Tally import'
-    }
-
-    const cleanLedgerEntries = ledgerEntries.map(({ ledger_name, amount: a, is_debit }) => ({
-      ledger_name,
-      amount: a,
-      is_debit,
-    }))
-
-    const sourceHash = await digest(JSON.stringify({
-      company,
-      guid,
-      voucherNo,
-      voucherType,
-      date,
-      partyName,
-      amount,
-      paidAmount,
-      dueAmount,
-      items,
-      ledgerEntries: cleanLedgerEntries,
-    }))
-
-    rows.push({
-      rowType: 'voucher',
-      reference: voucherNo,
-      sourceKey: guid
-        ? `voucher:${company}:guid:${guid}`
-        : `voucher:${company}:${voucherType}:${date}:${voucherNo.toLowerCase()}`,
-      payload: {
-        voucher_no: voucherNo,
-        voucher_type: voucherType,
-        date,
-        party_name: partyName,
-        amount,
-        paid_amount: paidAmount,
-        due_amount: dueAmount,
-        payment_mode: paymentMode,
-        status: dueAmount > 0 ? 'Due' : 'Paid',
-        narration: val(voucher.NARRATION),
-        reference_no: val(voucher.REFERENCE),
-        source_system: 'tally',
-        source_company: company || 'default',
-        source_voucher_guid: guid || null,
-        source_hash: sourceHash,
-        items,
-        ledger_entries: cleanLedgerEntries,
-      },
-    })
+    const closing = first(summaryInfo[index], ['DSPSTKCL'])
+    if (!closing || typeof closing !== 'object') continue
+    const quantityText = val(first(closing, ['DSPCLQTY']))
+    const quantity = maybeSigned(quantityText)
+    const rateText = val(first(closing, ['DSPCLRATE']))
+    const value = maybeSigned(first(closing, ['DSPCLAMTA']))
+    const unit = quantityText.match(/\s+([\p{L}][\p{L} ._-]*)\s*$/u)?.[1]?.trim()
+    rows.push({ rowType: 'stock_item', payload: {
+      name, sku: await skuFor(name),
+      ...(unit ? { unit } : {}),
+      ...(quantity !== null ? { current_qty: quantity } : {}),
+      ...(rateText !== '' ? { purchase_rate: magnitude(rateText) } : {}),
+      ...(value !== null ? { current_value: value } : {}),
+    } })
   }
 
   return { rows, ignored }

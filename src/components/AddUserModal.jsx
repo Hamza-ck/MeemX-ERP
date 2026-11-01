@@ -22,7 +22,7 @@ export default function AddUserModal({
 
   const [name, setName] = useState('')
   const [phone, setPhone] = useState('')
-  const [role, setRole] = useState('owner') // 'owner' | 'employee' | 'admin'
+  const [role, setRole] = useState('owner') // 'owner' | 'admin'
   const [pin, setPin] = useState('')
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
@@ -33,7 +33,7 @@ export default function AddUserModal({
     if (editingUser) {
       setName(editingUser.name || '')
       setPhone(editingUser.phone || '')
-      setRole(editingUser.role === 'admin' ? 'admin' : editingUser.role === 'employee' ? 'employee' : 'owner')
+      setRole(editingUser.role === 'admin' ? 'admin' : 'owner')
       setPin(editingUser.pin || '')
     } else {
       setName('')
@@ -79,6 +79,10 @@ export default function AddUserModal({
 
     if (cleanPin.length !== 4) {
       setError('Please enter a valid 4-digit numeric PIN.')
+      return
+    }
+    if (cleanPin === '1234' || cleanPin === '8888') {
+      setError('Choose a PIN other than 1234 or 8888.')
       return
     }
 
@@ -188,24 +192,6 @@ export default function AddUserModal({
                 onChange={(e) => setPhone(e.target.value)}
                 className="w-full bg-transparent text-xs font-semibold text-[#11382f] outline-none placeholder:font-normal placeholder:text-[#8ea59d]"
               />
-            </div>
-          </div>
-
-          {/* Role Selector */}
-          <div>
-            <label className="block text-xs font-bold text-[#143d35] mb-1.5">
-              Role <span className="text-[#c25e19]">*</span>
-            </label>
-            <div className="flex items-center gap-2.5 rounded-2xl border border-[#d8e3de] bg-[#fafcfb] px-3.5 py-2.5 focus-within:border-[#0e655d] focus-within:bg-white transition">
-              <select
-                value={role}
-                onChange={(e) => setRole(e.target.value)}
-                className="w-full bg-transparent text-xs font-bold text-[#11382f] outline-none cursor-pointer"
-              >
-                <option value="owner">Owner (view only)</option>
-                <option value="employee">Employee (view only)</option>
-                <option value="admin">Admin (full access)</option>
-              </select>
             </div>
           </div>
 

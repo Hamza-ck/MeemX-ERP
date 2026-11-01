@@ -156,29 +156,4 @@ describe('voucher accounting regressions', () => {
     await service.deleteVoucher(v.id)
     assert.equal((await database.materials.get(9)).current_qty, 5)       // was 8 with the old clamp
   })
-
-  it('credit_note and debit_note reverse stock and party balance accurately', async () => {
-    const database = empty()
-    const service = createVoucherMutationService({ database })
-    await service.createVoucher(sale({ items: [{ material_id: 9, sku: 'W-1', qty: 3 }] }))
-    assert.equal((await database.materials.get(9)).current_qty, 2)
-    const cn = await service.createVoucher({
-      voucher_type: 'credit_note',
-      voucher_no: 'CN-1',
-      date: '2026-10-30',
-      party_name: 'New Customer',
-      amount: 400,
-      paid_amount: 0,
-      due_amount: 400,
-      payment_mode: 'Cash',
-      items: [{ material_id: 9, sku: 'W-1', qty: 1 }],
-    })
-    assert.equal((await database.materials.get(9)).current_qty, 3)
-    const [partyAfterCn] = await database.parties.toArray()
-    assert.equal(partyAfterCn.current_balance, 600)
-    await service.deleteVoucher(cn.id)
-    assert.equal((await database.materials.get(9)).current_qty, 2)
-    const [partyAfterDel] = await database.parties.toArray()
-    assert.equal(partyAfterDel.current_balance, 1000)
-  })
 })

@@ -185,9 +185,9 @@ async function applyVoucherEffects(voucher, isReversal = false, database = accDb
 
       if (material) {
         let qtyChange = 0
-        if (voucher.voucher_type === 'sales' || voucher.voucher_type === 'debit_note') {
+        if (voucher.voucher_type === 'sales') {
           qtyChange = -itemQty * multiplier
-        } else if (voucher.voucher_type === 'purchase' || voucher.voucher_type === 'credit_note') {
+        } else if (voucher.voucher_type === 'purchase') {
           qtyChange = itemQty * multiplier
         }
 
@@ -217,16 +217,12 @@ async function applyVoucherEffects(voucher, isReversal = false, database = accDb
       if (party.type === 'debtor') {
         if (voucher.voucher_type === 'sales') {
           balanceChange = dueAmount * multiplier
-        } else if (voucher.voucher_type === 'credit_note') {
-          balanceChange = -(dueAmount || amount) * multiplier
         } else if (voucher.voucher_type === 'receipt') {
           balanceChange = -amount * multiplier
         }
       } else if (party.type === 'creditor') {
         if (voucher.voucher_type === 'purchase') {
           balanceChange = dueAmount * multiplier
-        } else if (voucher.voucher_type === 'debit_note') {
-          balanceChange = -(dueAmount || amount) * multiplier
         } else if (voucher.voucher_type === 'payment') {
           balanceChange = -amount * multiplier
         }
@@ -249,10 +245,6 @@ async function applyVoucherEffects(voucher, isReversal = false, database = accDb
       cashChange = amount * multiplier
     } else if (voucher.voucher_type === 'payment') {
       cashChange = -amount * multiplier
-    } else if (voucher.voucher_type === 'credit_note') {
-      cashChange = -paidAmount * multiplier
-    } else if (voucher.voucher_type === 'debit_note') {
-      cashChange = paidAmount * multiplier
     } else if (voucher.voucher_type === 'contra') {
       cashChange = 0
     }

@@ -11,6 +11,5 @@ const syncService = createSyncService({
 
 export const ensureSupabaseAuth = syncService.ensureSupabaseAuth
 export const syncFromSupabase = syncService.syncFromSupabase
-export const pushLocalChanges = syncService.pushLocalChanges
 export const pushSharedSetting = syncService.pushSharedSetting
 export const readCloudVersion = syncService.readCloudVersion

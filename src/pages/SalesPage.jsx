@@ -12,28 +12,20 @@ import Nav from '../components/Nav'
 import InvoicePrintModal from '../components/InvoicePrintModal'
 import AdminEditModal from '../components/AdminEditModal'
 import SalesBarChart from '../components/SalesBarChart'
-import { useAuth } from '../context/AuthContext'
 import { accDb } from '../lib/accountingDb'
-import { calculateSalesMetrics } from '../lib/dashboardMetrics'
+import { calculateSalesMetrics, computeDebtorAging } from '../lib/dashboardMetrics'
 
 export default function SalesPage() {
-  const { isAdmin } = useAuth()
   const navigate = useNavigate()
   const [selectedInvoice, setSelectedInvoice] = useState(null)
   const [editingInvoice, setEditingInvoice] = useState(null)
   const [search, setSearch] = useState('')
   const [invoices, setInvoices] = useState([])
-  const [allSalesVouchers, setAllSalesVouchers] = useState([])
 
   // Format date helper for invoice cards
   const formatInvoiceDate = (dateStr) => {
     if (!dateStr) return 'Today'
     try {
-      const match = String(dateStr).match(/^(\d{4})-(\d{2})-(\d{2})/)
-      if (match) {
-        const d = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
-        return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
-      }
       const d = new Date(dateStr)
       if (isNaN(d.getTime())) return dateStr
       return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
@@ -42,39 +34,40 @@ export default function SalesPage() {
     }
   }
 
-  // Derive the 7-day summary from the same local-calendar metric helper as the dashboard (including credit notes).
-  const { sales7Days, sales7DaysTotal } = useMemo(
-    () => calculateSalesMetrics(allSalesVouchers),
-    [allSalesVouchers]
-  )
+  // Derive the 7-day summary from the same local-calendar metric helper as the dashboard.
+  const { sales7Days, sales7DaysTotal } = useMemo(() => calculateSalesMetrics(invoices), [invoices])
   const formatChartMoney = (amount) => `₹${Number(amount || 0).toLocaleString('en-IN')}`
 
   // Load live invoices from Dexie DB
   const loadInvoices = useCallback(async () => {
     try {
-      const allVouchers = await accDb.vouchers.toArray()
-      const salesAndReturns = allVouchers.filter(
-        (v) => v.voucher_type === 'sales' || v.voucher_type === 'credit_note'
-      )
-      setAllSalesVouchers(salesAndReturns)
-
-      const dbVouchers = allVouchers
-        .filter((v) => v.voucher_type === 'sales')
-        .sort((a, b) => {
-          const dateA = String(a.date || '')
-          const dateB = String(b.date || '')
-          if (dateB !== dateA) return dateB.localeCompare(dateA)
-          return String(b.voucher_no || '').localeCompare(String(a.voucher_no || ''), undefined, { numeric: true })
-        })
+      const [dbVouchers, parties] = await Promise.all([
+        accDb.vouchers.where('voucher_type').anyOf('sales', 'credit_note').toArray(),
+        accDb.parties.where('type').equals('debtor').toArray(),
+      ])
+      // Paid/Due comes from the debtor's live balance (receipts settle the oldest invoices first),
+      // not from the due_amount frozen at invoice time, which never clears for credit sales.
+      const { outstandingByVoucher, byParty } = computeDebtorAging(parties, dbVouchers)
+      const partiesByName = new Map(parties.map((p) => [String(p.name).trim().toLowerCase(), p]))
+      // Newest invoice first by DOCUMENT date — the local row id is just sync order.
+      dbVouchers.sort((a, b) => String(b.date).localeCompare(String(a.date)) || String(b.voucher_no).localeCompare(String(a.voucher_no), undefined, { numeric: true }))
 
       if (dbVouchers && dbVouchers.length > 0) {
         const mapped = dbVouchers.map((v) => {
-          const isDue = Number(v.due_amount) > 0 || v.status === 'Due'
+          const isCreditNote = v.voucher_type === 'credit_note'
+          const knownParty = partiesByName.has(String(v.party_name).trim().toLowerCase()) && byParty.size > 0
+          const outstanding = v.source_system === 'tally' && knownParty
+            ? (outstandingByVoucher.get(v.id ?? v.voucher_no) || 0)
+            : Number(v.due_amount) || 0
+          const isDue = !isCreditNote && (outstanding > 0 || (!knownParty && v.status === 'Due'))
           return {
             ...v,
+            outstanding,
             displayDate: v.displayDate || formatInvoiceDate(v.date),
-            status: isDue ? 'Due' : 'Paid',
-            statusTone: isDue
+            status: isCreditNote ? 'Return' : isDue ? 'Due' : 'Paid',
+            statusTone: isCreditNote
+              ? 'bg-[#eef1f6] text-[#4a5a78]'
+              : isDue
               ? 'bg-[#fef3eb] text-[#c25e19]'
               : 'bg-[#e2f3ec] text-[#0d786d]',
           }
@@ -86,7 +79,6 @@ export default function SalesPage() {
     } catch (err) {
       console.warn('Error fetching invoices from Dexie:', err)
       setInvoices([])
-      setAllSalesVouchers([])
     }
   }, [])
 
@@ -119,7 +111,7 @@ export default function SalesPage() {
       <Nav />
 
       <main className="mx-auto max-w-2xl px-4 pt-4 sm:px-6 sm:pt-6">
-        {/* Top Header with Back button and Tally import button (PDF Page 3) */}
+        {/* Top Header with Back button and "+ New invoice" button (PDF Page 3) */}
         <header className="mb-4 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <button
@@ -135,17 +127,15 @@ export default function SalesPage() {
             </h1>
           </div>
 
-          {isAdmin && (
-            <button
-              type="button"
-              onClick={() => navigate('/tally')}
-              className="flex items-center gap-1.5 rounded-2xl bg-[#0e655d] px-3.5 py-2 text-xs font-extrabold text-white shadow-xs hover:bg-[#0a4f49] transition active:scale-95"
-              title="Import vouchers directly from Tally XML / Excel"
-            >
-              <FileSpreadsheet size={16} strokeWidth={2.5} />
-              <span>Tally import</span>
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={() => navigate('/tally')}
+            className="flex items-center gap-1.5 rounded-2xl bg-[#0e655d] px-3.5 py-2 text-xs font-extrabold text-white shadow-xs hover:bg-[#0a4f49] transition active:scale-95"
+            title="Import vouchers directly from Tally XML / Excel"
+          >
+            <FileSpreadsheet size={16} strokeWidth={2.5} />
+            <span>Tally import</span>
+          </button>
         </header>
 
         {/* 7 Days Performance & Bar Chart (PDF Page 3) */}
@@ -228,19 +218,17 @@ export default function SalesPage() {
                   </div>
 
                   {/* Admin Edit button */}
-                  {isAdmin && (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        setEditingInvoice(inv)
-                      }}
-                      className="grid h-10 w-10 place-items-center rounded-2xl bg-[#f0f9f5] border border-[#0e655d]/20 text-[#0e655d] hover:bg-[#e3f4ee] transition active:scale-95"
-                      title="Admin edit invoice details"
-                    >
-                      <Edit3 size={16} strokeWidth={2.5} />
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setEditingInvoice(inv)
+                    }}
+                    className="grid h-10 w-10 place-items-center rounded-2xl bg-[#f0f9f5] border border-[#0e655d]/20 text-[#0e655d] hover:bg-[#e3f4ee] transition active:scale-95"
+                    title="Admin edit invoice details"
+                  >
+                    <Edit3 size={16} strokeWidth={2.5} />
+                  </button>
 
                   {/* Solid teal square download/arrow button matching PDF */}
                   <button

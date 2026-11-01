@@ -21,12 +21,9 @@ import { fileURLToPath } from 'node:url'
 
 import { loadConfig, redactUrl } from './config.mjs'
 import { sendToTally, buildExportRequest, TallyConnectionError } from './tally_client.mjs'
-import {
-  countElements, hasData, buildPreviewPayload, monthlyChunks, dayChunks,
-  extractMaxVoucherDate, extractGroupParents, ymdToIso, splitRange,
-} from './normalize.mjs'
+import { countElements, hasData, buildPreviewPayload, monthlyChunks, extractGroupParents, splitRange, ymdToIso } from './normalize.mjs'
+import { loadState, saveState, acquireLock, sha256, financialYearStart } from './state.mjs'
 import { authenticate, previewAndCommit, getLastSyncDate, setLastSyncDate } from './supabase_client.mjs'
-import { sha256, loadState, saveState, acquireLock, financialYearStart } from './state.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -44,8 +41,6 @@ function parseCliArgs(argv) {
       'tally-host':   { type: 'string' },
       'tally-port':   { type: 'string' },
       'tally-company':{ type: 'string' },
-      'max-days':     { type: 'string',  default: '30' },
-      'chunk-days':   { type: 'string',  default: '15' },
       help:           { type: 'boolean', short: 'h', default: false },
     },
     allowPositionals: true,
@@ -83,8 +78,6 @@ Commands:
 
   incremental  Sync from (last successful run - 7 days) to today; once a day also
                re-reads and reconciles the whole financial year.
-               --max-days N       Days to pull on first run (default: 30)
-               --chunk-days N     Days per chunk window (default: 15)
                --loop             Run repeatedly until Ctrl+C
                --every N          Minutes between runs (default: 15)
 
@@ -93,8 +86,6 @@ Options:
   --tally-port PORT       Override TALLY_PORT (default: 9000)
   --tally-company NAME    Company name exactly as in Tally (required)
   --allow-remote          Allow non-loopback Tally host (UNSAFE)
-  --max-days N            Lookback window in days for first-run incremental (default: 30)
-  --chunk-days N          Days per chunk window for sequential pull (default: 15)
   -h, --help              Show this help
 `)
 }
@@ -115,7 +106,7 @@ async function cmdDiscover(config, values) {
   const toDate = (values.to || today).replace(/-/g, '')
 
   console.log(`\n🔍 Discover: requesting masters and vouchers (${fromDate}–${toDate}) from Tally...`)
-  console.log(`   Tally: ${config.tally.host}:${config.tally.port}, Company: ${config.tally.company || 'active company'}\n`)
+  console.log(`   Tally: ${config.tally.host}:${config.tally.port}, Company: ${config.tally.company || '(not set)'}\n`)
 
   const samplesDir = resolve(__dirname, 'samples')
   mkdirSync(samplesDir, { recursive: true })
@@ -221,11 +212,6 @@ async function syncVoucherRange({ config, accessToken, state, fromDate, toDate, 
     config.tally,
   )
   if (!/<ENVELOPE/i.test(response)) throw new Error('Tally returned a response without an <ENVELOPE>; refusing to reconcile.')
-
-  if (!hasData(response)) {
-    console.log(`   ${label}: no vouchers in Tally for this period`)
-    return
-  }
 
   const key = `vouchers:${fromDate}-${toDate}`
   const hash = sha256(response)
@@ -374,7 +360,7 @@ async function cmdPull(config, values) {
     // Only a pull that reaches today may move the cursor; a historical back-fill must not make
     // the incremental run skip the days after it.
     if (failures === 0 && toDate >= today) {
-      try { await setLastSyncDate(config.supabase, accessToken, null, runStartedAt.toISOString()) } catch (err) {
+      try { await setLastSyncDate(config.supabase, accessToken, null, undefined, runStartedAt) } catch (err) {
         console.error(`   ⚠️  ${err.message}`)
         process.exitCode = 1
       }
@@ -445,7 +431,7 @@ async function cmdIncremental(config, _values) {
       saveState(state)
       try {
         // Cursor = when this run STARTED, so edits made during the run are re-read next time.
-        await setLastSyncDate(config.supabase, accessToken, null, runStartedAt.toISOString())
+        await setLastSyncDate(config.supabase, accessToken, null, undefined, runStartedAt)
       } catch (err) {
         console.error(`   ⚠️  ${err.message}`)
         process.exitCode = 1

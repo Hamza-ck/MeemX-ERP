@@ -2,15 +2,15 @@
 -- Split broad ALL policies so they do not overlap their SELECT policies.
 drop policy if exists "Profiles: Admin manages profiles" on public.profiles;
 drop policy if exists "Profiles: user reads self or Admin reads all" on public.profiles;
-drop policy if exists "Profiles: Admin inserts profiles" on public.profiles;
-drop policy if exists "Profiles: Admin updates profiles" on public.profiles;
-drop policy if exists "Profiles: Admin deletes profiles" on public.profiles;
 create policy "Profiles: user reads self or Admin reads all" on public.profiles
   for select to authenticated using (id = (select auth.uid()) or (select public.is_admin()));
+drop policy if exists "Profiles: Admin inserts profiles" on public.profiles;
 create policy "Profiles: Admin inserts profiles" on public.profiles
   for insert to authenticated with check ((select public.is_admin()));
+drop policy if exists "Profiles: Admin updates profiles" on public.profiles;
 create policy "Profiles: Admin updates profiles" on public.profiles
   for update to authenticated using ((select public.is_admin())) with check ((select public.is_admin()));
+drop policy if exists "Profiles: Admin deletes profiles" on public.profiles;
 create policy "Profiles: Admin deletes profiles" on public.profiles
   for delete to authenticated using ((select public.is_admin()));
 
@@ -66,30 +66,40 @@ drop policy if exists "Admin deletes vouchers" on public.vouchers;
 create policy "Admin deletes vouchers" on public.vouchers
   for delete to authenticated using ((select public.is_admin()));
 
+-- app_settings is created outside this repo in some projects; only touch it when it exists.
+do $mig$
+begin
+  if to_regclass('public.app_settings') is not null then
+    execute $q$
 drop policy if exists "Authenticated users read app settings" on public.app_settings;
-drop policy if exists "Admin manages app settings" on public.app_settings;
-drop policy if exists "Admin inserts app settings" on public.app_settings;
-drop policy if exists "Admin updates app settings" on public.app_settings;
-drop policy if exists "Admin deletes app settings" on public.app_settings;
 create policy "Authenticated users read app settings" on public.app_settings
   for select to authenticated using ((select auth.uid()) is not null);
+drop policy if exists "Admin manages app settings" on public.app_settings;
+drop policy if exists "Admin inserts app settings" on public.app_settings;
 create policy "Admin inserts app settings" on public.app_settings
   for insert to authenticated with check ((select public.is_admin()));
+drop policy if exists "Admin updates app settings" on public.app_settings;
 create policy "Admin updates app settings" on public.app_settings
   for update to authenticated using ((select public.is_admin())) with check ((select public.is_admin()));
+drop policy if exists "Admin deletes app settings" on public.app_settings;
 create policy "Admin deletes app settings" on public.app_settings
   for delete to authenticated using ((select public.is_admin()));
+    $q$;
+  end if;
+end
+$mig$;
 
 drop policy if exists "Authenticated users read accounting refresh state" on public.accounting_refresh_state;
-drop policy if exists "Admin updates accounting refresh state" on public.accounting_refresh_state;
-drop policy if exists "Admin inserts accounting refresh state" on public.accounting_refresh_state;
-drop policy if exists "Admin deletes accounting refresh state" on public.accounting_refresh_state;
 create policy "Authenticated users read accounting refresh state" on public.accounting_refresh_state
   for select to authenticated using ((select auth.uid()) is not null);
+drop policy if exists "Admin updates accounting refresh state" on public.accounting_refresh_state;
+drop policy if exists "Admin inserts accounting refresh state" on public.accounting_refresh_state;
 create policy "Admin inserts accounting refresh state" on public.accounting_refresh_state
   for insert to authenticated with check ((select public.is_admin()));
+drop policy if exists "Admin updates accounting refresh state" on public.accounting_refresh_state;
 create policy "Admin updates accounting refresh state" on public.accounting_refresh_state
   for update to authenticated using ((select public.is_admin())) with check ((select public.is_admin()));
+drop policy if exists "Admin deletes accounting refresh state" on public.accounting_refresh_state;
 create policy "Admin deletes accounting refresh state" on public.accounting_refresh_state
   for delete to authenticated using ((select public.is_admin()));
 
@@ -106,7 +116,11 @@ create policy "Admin reads audit logs" on public.audit_logs
 
 create index if not exists idx_accounting_refresh_state_last_import_job
   on public.accounting_refresh_state(last_successful_import_job);
-create index if not exists idx_app_settings_updated_by on public.app_settings(updated_by);
+do $mig$ begin
+  if to_regclass('public.app_settings') is not null then
+    execute 'create index if not exists idx_app_settings_updated_by on public.app_settings(updated_by)';
+  end if;
+end $mig$;
 create index if not exists idx_audit_logs_actor_id on public.audit_logs(actor_id);
 create index if not exists idx_import_jobs_created_by on public.import_jobs(created_by);
 create index if not exists idx_vouchers_created_by on public.vouchers(created_by);

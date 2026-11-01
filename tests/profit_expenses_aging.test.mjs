@@ -19,15 +19,17 @@ describe('profit', () => {
     const vouchers = [
       tally({ voucher_type: 'sales', date: '2026-10-30', amount: 11800, party_name: 'Acme', items: [{ name: 'Pen', qty: 100 }],
         ledger_entries: [e('Acme', 11800, true), e('Sales Account', 10000, false), e('CGST', 1800, false)] }),
+      // big stock purchase the same day: must NOT wipe out the day's profit
       tally({ voucher_type: 'purchase', date: '2026-10-30', amount: 50000, party_name: 'Mill',
         ledger_entries: [e('Mill', 50000, false), e('Purchase Account', 50000, true)] }),
       tally({ voucher_type: 'payment', date: '2026-10-30', amount: 1000, party_name: 'Rent',
         ledger_entries: [e('HDFC', 1000, false), e('Rent', 1000, true)] }),
     ]
-    const materials = [{ name: 'Pen', current_qty: 400, current_value: 20000, purchase_rate: 1 }]
+    const materials = [{ name: 'Pen', current_qty: 400, current_value: 20000, purchase_rate: 1 }] // avg cost 50
     const r = calculateDashboardMetrics(vouchers, ledgers, now, { materials })
+    // 10,000 net sales (GST excluded) − 100×50 COGS − 1,000 rent = 4,000
     assert.equal(r.operatingResultToday, 4000)
-    assert.equal(r.expensesToday, 1000)
+    assert.equal(r.expensesToday, 1000)           // purchases are not "expenses"
     assert.equal(r.salesToday, 11800)
   })
 
@@ -40,7 +42,7 @@ describe('profit', () => {
     ]
     const r = calculateDashboardMetrics(vouchers, ledgers, now, { materials: [{ name: 'Pen', current_qty: 10, current_value: 500 }] })
     assert.equal(r.salesToday, 600)
-    assert.equal(r.operatingResultToday, 600 - (10 * 50 - 4 * 50))
+    assert.equal(r.operatingResultToday, 600 - (10 * 50 - 4 * 50))   // 600 − 300
   })
 
   it('without item data it falls back to a purchases basis instead of showing nothing', () => {
@@ -72,7 +74,7 @@ describe('expense breakdown', () => {
   it('uses this month\'s postings, excludes purchases, and compares equal day-spans', () => {
     const vouchers = [
       pay('2026-10-05', 'Rent', 10000), pay('2026-10-20', 'Transport', 2000),
-      pay('2026-09-05', 'Rent', 10000),
+      pay('2026-09-05', 'Rent', 10000),          // inside Sep 1–30 comparison span
       pay('2026-09-12', 'Transport', 5000),
       tally({ voucher_type: 'purchase', date: '2026-10-10', amount: 99999, party_name: 'M', ledger_entries: [e('M', 99999, false), e('Purchase Account', 99999, true)] }),
     ]
@@ -96,6 +98,7 @@ describe('debtor ageing', () => {
     const parties = [{ id: 1, name: 'Acme', type: 'debtor', current_balance: 1500 }]
     const vouchers = [inv('S1', '2026-07-01', 1000), inv('S2', '2026-09-20', 800), inv('S3', '2026-10-25', 700)]
     const { byParty, totals, outstandingByVoucher } = computeDebtorAging(parties, vouchers, now)
+    // 1500 = S3 700 (5d) + S2 800 (40d); S1 was settled
     assert.equal(totals['0–30d'], 700)
     assert.equal(totals['31–60d'], 800)
     assert.equal(totals['60d+'], 0)

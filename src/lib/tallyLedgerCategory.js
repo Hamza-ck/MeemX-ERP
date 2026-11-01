@@ -1,6 +1,6 @@
 const normalized = (value) => String(value || '').replace(/[\u0000-\u001f]/g, '').trim().toLowerCase()
 
-// Keep in sync with supabase/functions/tally-import/parser.js (tests/tally_parser.test.mjs enforces parity).
+// Keep in sync with supabase/functions/tally-import/parser.js (tests/category_parity.test.mjs enforces it).
 const EXACT_CATEGORY = new Map([
   ['direct expenses', 'expense'], ['indirect expenses', 'expense'], ['purchase accounts', 'expense'],
   ['direct incomes', 'income'], ['indirect incomes', 'income'], ['sales accounts', 'income'],

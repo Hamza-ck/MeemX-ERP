@@ -113,17 +113,15 @@ export default function InventoryPage() {
             </h1>
           </div>
 
-          {isAdmin && (
-            <button
-              type="button"
-              onClick={() => navigate('/tally')}
-              className="flex items-center gap-1.5 rounded-2xl bg-[#0e655d] px-3.5 py-2 text-xs font-extrabold text-white shadow-xs hover:bg-[#0a4f49] transition active:scale-95"
-              title="Import stock items and rates from Tally"
-            >
-              <FileSpreadsheet size={16} strokeWidth={2.5} />
-              <span>Tally import</span>
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={() => navigate('/tally')}
+            className="flex items-center gap-1.5 rounded-2xl bg-[#0e655d] px-3.5 py-2 text-xs font-extrabold text-white shadow-xs hover:bg-[#0a4f49] transition active:scale-95"
+            title="Import stock items and rates from Tally"
+          >
+            <FileSpreadsheet size={16} strokeWidth={2.5} />
+            <span>Tally import</span>
+          </button>
         </header>
 
         {/* Stock Value & Low Stock Dual Cards (PDF Page 7) */}

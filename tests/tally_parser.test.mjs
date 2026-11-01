@@ -55,6 +55,7 @@ describe('sales voucher math', () => {
   })
 
   it('a discount ledger no longer shows up as money the customer "paid"', async () => {
+    // items 10000 gross, discount 500 (Dr), customer owes 9500
     const b = entry('ALLLEDGERENTRIES.LIST', 'Acme', '-9500.00', 'Yes') +
       entry('ALLLEDGERENTRIES.LIST', 'Discount Allowed', '-500.00', 'Yes') +
       entry('ALLLEDGERENTRIES.LIST', 'Sales Account', '10000.00', 'No') +
@@ -62,7 +63,7 @@ describe('sales voucher math', () => {
     const p = (await parse(voucher({ body: b }))).rows[0].payload
     assert.equal(p.amount, 10000)
     assert.equal(p.due_amount, 9500)
-    assert.equal(p.paid_amount, 500)
+    assert.equal(p.paid_amount, 500)           // discount is the 500 gap; due is what is really owed
     assert.equal(p.items[0].qty, 100)
   })
 
@@ -120,9 +121,9 @@ describe('ledger balances keep their side', () => {
   it('customer who owes us is positive, one who prepaid is negative; overdrawn bank is negative', async () => {
     const ledger = (name, parent, closing) => `<LEDGER NAME="${name}"><PARENT>${parent}</PARENT><OPENINGBALANCE>0</OPENINGBALANCE><CLOSINGBALANCE>${closing}</CLOSINGBALANCE></LEDGER>`
     const { rows } = await parse(
-      ledger('Debtor Owes', 'Retail Customers', '-5000.00') +
-      ledger('Debtor Prepaid', 'Retail Customers', '700.00') +
-      ledger('HDFC OD', 'Bank Accounts', '1200.00'),
+      ledger('Debtor Owes', 'Retail Customers', '-5000.00') +   // Dr 5000
+      ledger('Debtor Prepaid', 'Retail Customers', '700.00') +  // Cr 700 (advance)
+      ledger('HDFC OD', 'Bank Accounts', '1200.00'),            // Cr 1200 = overdrawn
       { groupParents: groups })
     const by = Object.fromEntries(rows.map((r) => [r.payload.name, r]))
     assert.equal(by['Debtor Owes'].rowType, 'party')

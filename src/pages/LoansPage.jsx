@@ -6,12 +6,10 @@ import {
   Edit3,
 } from 'lucide-react'
 import Nav from '../components/Nav'
-import { useAuth } from '../context/AuthContext'
 import { accDb } from '../lib/accountingDb'
 import AdminEditModal from '../components/AdminEditModal'
 
 export default function LoansPage() {
-  const { isAdmin } = useAuth()
   const navigate = useNavigate()
   const [loansOwed, setLoansOwed] = useState([])
   const [advancesGiven, setAdvancesGiven] = useState([])
@@ -104,17 +102,15 @@ export default function LoansPage() {
             </h1>
           </div>
 
-          {isAdmin && (
-            <button
-              type="button"
-              onClick={() => navigate('/tally')}
-              className="flex items-center gap-1.5 rounded-2xl bg-[#0e655d] px-3.5 py-2 text-xs font-extrabold text-white shadow-xs hover:bg-[#0a4f49] transition active:scale-95"
-              title="Import vouchers & masters from Tally XML"
-            >
-              <FileSpreadsheet size={16} />
-              <span>Tally import</span>
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={() => navigate('/tally')}
+            className="flex items-center gap-1.5 rounded-2xl bg-[#0e655d] px-3.5 py-2 text-xs font-extrabold text-white shadow-xs hover:bg-[#0a4f49] transition active:scale-95"
+            title="Import vouchers & masters from Tally XML"
+          >
+            <FileSpreadsheet size={16} />
+            <span>Tally import</span>
+          </button>
         </header>
 
         {/* Featured Net You Owe Card (PDF Page 9) */}
@@ -151,17 +147,15 @@ export default function LoansPage() {
                       <strong className="block text-sm font-extrabold text-[#11382f]">
                         {l.name}
                       </strong>
-                      {isAdmin && (
-                        <button
-                          type="button"
-                          onClick={() => setEditingLoan({ id: l.id, name: l.name, current_balance: l.amount, group: 'Loans (Liability)', note: l.note })}
-                          className="opacity-75 group-hover:opacity-100 inline-flex items-center gap-1 rounded-md border border-[#cfded6] bg-[#f8faf9] px-2 py-0.5 text-[10px] font-bold text-[#0e655d] hover:bg-[#ebf3ef] transition"
-                          title="Admin Edit loan record"
-                        >
-                          <Edit3 size={11} />
-                          <span>Edit</span>
-                        </button>
-                      )}
+                      <button
+                        type="button"
+                        onClick={() => setEditingLoan({ id: l.id, name: l.name, current_balance: l.amount, group: 'Loans (Liability)', note: l.note })}
+                        className="opacity-75 group-hover:opacity-100 inline-flex items-center gap-1 rounded-md border border-[#cfded6] bg-[#f8faf9] px-2 py-0.5 text-[10px] font-bold text-[#0e655d] hover:bg-[#ebf3ef] transition"
+                        title="Admin Edit loan record"
+                      >
+                        <Edit3 size={11} />
+                        <span>Edit</span>
+                      </button>
                     </div>
                     {l.note && (
                       <span className="mt-1 block text-xs text-[#718d84]">
@@ -202,17 +196,15 @@ export default function LoansPage() {
                       <strong className="block text-sm font-extrabold text-[#11382f]">
                         {a.name}
                       </strong>
-                      {isAdmin && (
-                        <button
-                          type="button"
-                          onClick={() => setEditingLoan({ id: a.id, name: a.name, current_balance: a.amount, group: 'Loans & Advances (Asset)', note: a.note })}
-                          className="opacity-75 group-hover:opacity-100 inline-flex items-center gap-1 rounded-md border border-[#cfded6] bg-[#f8faf9] px-2 py-0.5 text-[10px] font-bold text-[#0e655d] hover:bg-[#ebf3ef] transition"
-                          title="Admin Edit advance record"
-                        >
-                          <Edit3 size={11} />
-                          <span>Edit</span>
-                        </button>
-                      )}
+                      <button
+                        type="button"
+                        onClick={() => setEditingLoan({ id: a.id, name: a.name, current_balance: a.amount, group: 'Loans & Advances (Asset)', note: a.note })}
+                        className="opacity-75 group-hover:opacity-100 inline-flex items-center gap-1 rounded-md border border-[#cfded6] bg-[#f8faf9] px-2 py-0.5 text-[10px] font-bold text-[#0e655d] hover:bg-[#ebf3ef] transition"
+                        title="Admin Edit advance record"
+                      >
+                        <Edit3 size={11} />
+                        <span>Edit</span>
+                      </button>
                     </div>
                     {a.note && (
                       <span className="mt-1 block text-xs text-[#718d84]">

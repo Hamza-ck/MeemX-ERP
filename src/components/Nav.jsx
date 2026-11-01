@@ -21,8 +21,7 @@ import {
 import { useAuth } from '../context/AuthContext'
 
 export default function Nav() {
-  const { user, role, shopName, signOut, syncCloudNow, cloudSyncStatus, cloudSyncError, blockedSyncState } = useAuth()
-  const isAdmin = role === 'admin'
+  const { isAdmin, user, role, shopName, signOut, syncCloudNow, cloudSyncStatus, cloudSyncError } = useAuth()
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false)
 
   // Overview links matching PDF Page 5 & Page 11
@@ -58,29 +57,12 @@ export default function Nav() {
     idle: 'Cloud sync is ready',
     syncing: 'Syncing cloud data…',
     synced: 'Cloud data is up to date',
-    pending: blockedSyncState?.reason === 'role_not_permitted'
-      ? `You have ${blockedSyncState.skipped} unsynced changes. An admin must sign in on this device to upload them.`
-      : 'Local changes are waiting for an administrator sync',
+    pending: 'Local changes are waiting for an administrator sync',
     error: cloudSyncError || 'Cloud sync needs attention',
   }[cloudSyncStatus] || 'Cloud sync is ready'
 
   return (
     <>
-      {/* Blocked Sync Banner (Step 6) */}
-      {blockedSyncState?.reason === 'role_not_permitted' && blockedSyncState.skipped > 0 && (
-        <div className="fixed top-0 left-0 right-0 z-50 flex flex-wrap items-center justify-between gap-3 bg-amber-500 px-4 py-2.5 text-xs font-semibold text-white shadow-md lg:left-64">
-          <span>
-            You have {blockedSyncState.skipped} unsynced changes. An admin must sign in on this device to upload them.
-          </span>
-          <button
-            type="button"
-            onClick={() => syncCloudNow()}
-            className="shrink-0 rounded-lg bg-white px-2.5 py-1 text-xs font-bold text-amber-950 hover:bg-amber-100 transition shadow-xs cursor-pointer"
-          >
-            retry after admin login
-          </button>
-        </div>
-      )}
       {/* ================= DESKTOP SIDEBAR (PDF Page 5, 11, 13, 14) ================= */}
       <aside className="fixed inset-y-0 left-0 z-40 hidden w-64 flex-col bg-[#0b3832] px-4 py-5 text-white shadow-xl lg:flex">
         {/* Brand Header */}

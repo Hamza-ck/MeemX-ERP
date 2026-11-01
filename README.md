@@ -64,7 +64,11 @@ The app will be available at `http://localhost:3000`.
 - A device PIN is an optional local screen lock after account sign-in. It does not authenticate an account or grant an application role. Without a configured PIN, successful account sign-in opens the app directly.
 - Use **Export all data** before device replacement or recovery. Cloud sync is not a backup service, and browser-local data is not available on a new device until it has been synced.
 
-Apply the ordered SQL files under `supabase/migrations/` to an existing project. For a fresh project, use `supabase/schema.sql` and deploy the required Edge Functions.
+Apply the ordered SQL files under `supabase/migrations/` to an existing project. For a fresh project, run `supabase/schema.sql` **and then every file in `supabase/migrations/` in filename order** (`schema.sql` alone predates the snapshot, signed-balance and live-sync changes), then deploy the Edge Functions (`tally-import`, `create-user`).
+
+**Live data.** Signed-in devices refresh automatically: they listen for the connector's commits in realtime (Supabase Realtime on `accounting_refresh_state`), poll a tiny change marker every 45 s, and re-check when the tab regains focus or the network returns. A full re-read happens only when something changed. An administrator's role change and the owner-view card settings (`shared_view_settings`) also reach other devices without re-login.
+
+**Balances are signed.** Ledger and party balances are stored on their natural side: positive = the normal side (customer owes you, supplier is owed, bank in credit); negative = the opposite (customer advance, bank overdraft). Dashboards total only positive dues.
 
 ### Building for Production
 
@@ -89,7 +93,7 @@ Create a `connector/.env` file (git-ignored) or set environment variables:
 ```env
 TALLY_HOST=[IP_ADDRESS]  # Tally Machine IP address 
 TALLY_PORT=9000
-TALLY_COMPANY="Your Company Name Exactly As In Tally"
+TALLY_COMPANY="Your Company Name Exactly As In Tally"   # required: without it Tally answers for whichever company is open on screen
 
 SUPABASE_URL=https://<your-project>.supabase.co
 SUPABASE_ANON_KEY=<your-anon-key>
@@ -115,14 +119,23 @@ Run commands from the repository root:
 - **Incremental Sync**: Syncs recent entries with a 7-day safety overlap to catch edited vouchers:
   ```bash
   node connector/sync.mjs incremental
-  # First-run window option (default 30 days) and sequential chunk size (default 15 days):
-  node connector/sync.mjs incremental --max-days 30 --chunk-days 10
   ```
 
 - **Continuous Background Loop**: Automatically synchronizes every N minutes (default 15 minutes) until stopped:
   ```bash
   node connector/sync.mjs incremental --loop --every 15
   ```
+
+### How the daily sync works
+
+Each `incremental` run reads from (last successful run − 7 days) to today. **Once per calendar day** the first run also re-reads the whole current financial year (1 April by default; set `FY_START_MONTH` to change) and reconciles it, so late edits to old vouchers and vouchers deleted or cancelled in Tally are corrected, and anything a failed run missed is repaired.
+
+- The "last successful run" cursor is moved **only by the connector, after a run with zero failures**, and is set to the run's *start* time. A failed chunk is therefore retried on the next run instead of being skipped.
+- Uploads identical to the previous successful upload are skipped, so a 5-minute loop does not re-stage the whole ledger list each time (`--force`/`pull` always uploads).
+- A month that is too large for one upload is split by date automatically.
+- Vouchers that Tally no longer returns for a synced window are marked deleted (never hard-deleted). If one window would remove more than half of its vouchers the deletion is skipped and reported, so a truncated export cannot wipe data.
+- Orders, delivery/receipt notes, stock journals, memorandum, optional and cancelled vouchers are not imported as sales/purchases. Credit/debit notes import as returns.
+- A lock file prevents two runs overlapping (e.g. Task Scheduler plus `--loop`).
 
 ### 4. Windows Task Scheduler Setup (5 Steps)
 To automatically run the connector unattended on the shop PC:

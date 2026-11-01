@@ -14,7 +14,7 @@ import { accDb } from '../lib/accountingDb'
 import AdminEditModal from '../components/AdminEditModal'
 
 export default function CreditorsPage() {
-  const { shopName, isAdmin } = useAuth()
+  const { shopName } = useAuth()
   const navigate = useNavigate()
   const [search, setSearch] = useState('')
   const [suppliers, setSuppliers] = useState([])
@@ -113,17 +113,15 @@ export default function CreditorsPage() {
             </h1>
           </div>
 
-          {isAdmin && (
-            <button
-              type="button"
-              onClick={() => navigate('/tally')}
-              className="flex items-center gap-1.5 rounded-2xl bg-[#0e655d] px-3.5 py-2 text-xs font-extrabold text-white shadow-xs hover:bg-[#0a4f49] transition active:scale-95"
-              title="Import suppliers and payables from Tally"
-            >
-              <FileSpreadsheet size={16} strokeWidth={2.5} />
-              <span>Tally import</span>
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={() => navigate('/tally')}
+            className="flex items-center gap-1.5 rounded-2xl bg-[#0e655d] px-3.5 py-2 text-xs font-extrabold text-white shadow-xs hover:bg-[#0a4f49] transition active:scale-95"
+            title="Import suppliers and payables from Tally"
+          >
+            <FileSpreadsheet size={16} strokeWidth={2.5} />
+            <span>Tally import</span>
+          </button>
         </header>
 
         {/* Total You Owe & 3-segment Aging Bar (PDF Page 6) */}
@@ -239,17 +237,15 @@ export default function CreditorsPage() {
                       </button>
                     )}
 
-                    {isAdmin && (
-                      <button
-                        type="button"
-                        onClick={() => setEditingCreditor(supp)}
-                        className="flex items-center gap-1.5 rounded-xl border border-[#0e655d]/30 bg-[#f0f9f5] px-3.5 py-1.5 text-xs font-bold text-[#0e655d] hover:bg-[#e2f3ec] transition active:scale-95"
-                        title="Admin edit supplier details"
-                      >
-                        <Edit3 size={13} />
-                        <span>Edit</span>
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      onClick={() => setEditingCreditor(supp)}
+                      className="flex items-center gap-1.5 rounded-xl border border-[#0e655d]/30 bg-[#f0f9f5] px-3.5 py-1.5 text-xs font-bold text-[#0e655d] hover:bg-[#e2f3ec] transition active:scale-95"
+                      title="Admin edit supplier details"
+                    >
+                      <Edit3 size={13} />
+                      <span>Edit</span>
+                    </button>
                   </div>
                 </article>
               )
