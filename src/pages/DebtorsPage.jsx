@@ -238,7 +238,7 @@ export default function DebtorsPage() {
                         className={`mt-1 inline-block rounded-md px-2.5 py-0.5 text-[11px] font-bold ${
                           isCritical
                             ? 'bg-[#feeae6] text-[#b73725]'
-                            : days > 30
+                            : ageInfo?.bucket === '31–60d'
                             ? 'bg-[#e2f3ec] text-[#0d786d]'
                             : 'bg-[#e4f1eb] text-[#146b60]'
                         }`}

@@ -2,54 +2,63 @@ import { useState, useMemo, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   ChevronLeft,
+  ChevronDown,
+  ChevronUp,
   FileSpreadsheet,
   Edit3,
 } from 'lucide-react'
 import Nav from '../components/Nav'
 import { accDb } from '../lib/accountingDb'
+import { classifyLoanLedgers, ledgerTransactions, ledgerActivitySummary } from '../lib/ledgerActivity'
 import AdminEditModal from '../components/AdminEditModal'
 
 export default function LoansPage() {
   const navigate = useNavigate()
   const [loansOwed, setLoansOwed] = useState([])
   const [advancesGiven, setAdvancesGiven] = useState([])
+  const [vouchers, setVouchers] = useState([])
+  const [activity, setActivity] = useState(new Map())
+  const [expandedLedger, setExpandedLedger] = useState(null)
   const [editingLoan, setEditingLoan] = useState(null)
 
-  // Load from Dexie ledgers
+  // Load from Dexie ledgers and vouchers
   const loadLoans = useCallback(async () => {
     try {
-      const allLedgers = await accDb.ledgers.toArray()
-      const owed = allLedgers.filter((l) => (l.group || '').toLowerCase().includes('loans (liability)'))
-      const given = allLedgers.filter((l) => (l.group || '').toLowerCase().includes('loans & advances (asset)'))
+      const [allLedgers, allVouchers] = await Promise.all([
+        accDb.ledgers.toArray(),
+        accDb.vouchers.toArray(),
+      ])
 
-      if (owed.length > 0) {
-        setLoansOwed(
-          owed.map((l) => ({
-            id: l.id,
-            name: l.name,
-            amount: Number(l.current_balance) || 0,
-            note: l.note || '',
-          }))
-        )
-      } else {
-        setLoansOwed([])
-      }
+      const { owed, given } = classifyLoanLedgers(allLedgers)
+      const activityMap = ledgerActivitySummary(allVouchers)
 
-      if (given.length > 0) {
-        setAdvancesGiven(
-          given.map((l) => ({
-            id: l.id,
-            name: l.name,
-            amount: Number(l.current_balance) || 0,
-            note: l.note || '',
-          }))
-        )
-      } else {
-        setAdvancesGiven([])
-      }
+      setVouchers(allVouchers)
+      setActivity(activityMap)
+
+      setLoansOwed(
+        owed.map((l) => ({
+          id: l.id,
+          name: l.name,
+          amount: Math.abs(Number(l.current_balance) || 0),
+          group: l.group || l.primary_group || 'Loans (Liability)',
+          note: l.note || '',
+        }))
+      )
+
+      setAdvancesGiven(
+        given.map((l) => ({
+          id: l.id,
+          name: l.name,
+          amount: Math.abs(Number(l.current_balance) || 0),
+          group: l.group || l.primary_group || 'Loans & Advances (Asset)',
+          note: l.note || '',
+        }))
+      )
     } catch {
       setLoansOwed([])
       setAdvancesGiven([])
+      setVouchers([])
+      setActivity(new Map())
     }
   }, [])
 
@@ -79,6 +88,55 @@ export default function LoansPage() {
     if (amt >= 100000) return `₹${(amt / 100000).toFixed(1)}L`
     if (amt >= 1000) return `₹${(amt / 1000).toFixed(0)}K`
     return `₹${amt}`
+  }
+
+  const toggleExpand = (name) => {
+    setExpandedLedger((prev) => (prev === name ? null : name))
+  }
+
+  const renderTransactions = (ledgerName) => {
+    const { total, rows } = ledgerTransactions(vouchers, ledgerName, { limit: 20 })
+    if (total === 0) {
+      return (
+        <div className="mt-2 rounded-xl bg-[#f8faf9] p-3 text-xs text-[#718d84] text-center border border-[#e1e9e3]">
+          No dated voucher postings found for this ledger. Balance may be from opening master.
+        </div>
+      )
+    }
+
+    return (
+      <div className="mt-2 overflow-hidden rounded-xl border border-[#e1e9e3] bg-[#f8faf9]">
+        <div className="bg-[#ebf4ef] px-3 py-1.5 text-[11px] font-extrabold text-[#11382f] flex justify-between">
+          <span>Recent Transactions ({total})</span>
+          <span>Date / Type / Amount</span>
+        </div>
+        <div className="divide-y divide-[#e1e9e3] max-h-56 overflow-y-auto">
+          {rows.map((row, idx) => (
+            <div key={idx} className="px-3 py-2 text-xs flex items-center justify-between hover:bg-white transition">
+              <div>
+                <div className="flex items-center gap-1.5 font-bold text-[#11382f]">
+                  <span>{row.date}</span>
+                  <span className="rounded bg-[#e2f0ea] px-1.5 py-0.2 text-[10px] text-[#0d6e63] font-semibold uppercase">
+                    {row.voucher_type}
+                  </span>
+                  {row.voucher_no && (
+                    <span className="text-[#6d8880] text-[11px]">#{row.voucher_no}</span>
+                  )}
+                </div>
+                {row.narration && (
+                  <p className="text-[11px] text-[#718d84] truncate max-w-xs sm:max-w-md">{row.narration}</p>
+                )}
+              </div>
+              <div className="text-right">
+                <span className={`font-mono font-bold ${row.isDebit ? 'text-[#b73725]' : 'text-[#0d786d]'}`}>
+                  {row.isDebit ? 'Dr' : 'Cr'} ₹{row.amount.toLocaleString('en-IN')}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -126,9 +184,14 @@ export default function LoansPage() {
         {/* Section 1: Loans you owe (PDF Page 9) */}
         <section className="mb-5 rounded-3xl border border-[#e1e9e3] border-l-4 border-l-[#c25e19] bg-white p-5 sm:p-6 shadow-xs">
           <div className="flex items-center justify-between pb-4 border-b border-[#edf3f0]">
-            <h2 className="text-[17px] font-extrabold text-[#11382f]">
-              Loans you owe
-            </h2>
+            <div>
+              <h2 className="text-[17px] font-extrabold text-[#11382f]">
+                Loans you owe
+              </h2>
+              <span className="text-[11px] text-[#718d84]">
+                Tap any ledger to view underlying voucher transactions
+              </span>
+            </div>
             <strong className="text-[18px] font-extrabold text-[#c25e19]">
               {formatAmount(totalLoansOwed)}
             </strong>
@@ -140,34 +203,61 @@ export default function LoansPage() {
             </div>
           ) : (
             <div className="divide-y divide-[#edf3f0]">
-              {loansOwed.map((l) => (
-                <div key={l.id || l.name} className="py-4 flex items-start justify-between group">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <strong className="block text-sm font-extrabold text-[#11382f]">
-                        {l.name}
-                      </strong>
-                      <button
-                        type="button"
-                        onClick={() => setEditingLoan({ id: l.id, name: l.name, current_balance: l.amount, group: 'Loans (Liability)', note: l.note })}
-                        className="opacity-75 group-hover:opacity-100 inline-flex items-center gap-1 rounded-md border border-[#cfded6] bg-[#f8faf9] px-2 py-0.5 text-[10px] font-bold text-[#0e655d] hover:bg-[#ebf3ef] transition"
-                        title="Admin Edit loan record"
-                      >
-                        <Edit3 size={11} />
-                        <span>Edit</span>
-                      </button>
+              {loansOwed.map((l) => {
+                const isExpanded = expandedLedger === l.name
+                const count = activity.get(l.name.toLowerCase())?.count || 0
+
+                return (
+                  <div key={l.id || l.name} className="py-3">
+                    <div className="flex items-start justify-between group">
+                      <div className="flex-1 cursor-pointer" onClick={() => toggleExpand(l.name)}>
+                        <div className="flex items-center gap-2">
+                          <strong className="block text-sm font-extrabold text-[#11382f] hover:text-[#0e655d] transition">
+                            {l.name}
+                          </strong>
+                          {count > 0 && (
+                            <span className="rounded bg-[#e8f3ee] px-1.5 py-0.5 text-[10px] font-extrabold text-[#0e655d]">
+                              {count} tx
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setEditingLoan({ id: l.id, name: l.name, current_balance: l.amount, group: l.group, note: l.note })
+                            }}
+                            className="opacity-75 group-hover:opacity-100 inline-flex items-center gap-1 rounded-md border border-[#cfded6] bg-[#f8faf9] px-2 py-0.5 text-[10px] font-bold text-[#0e655d] hover:bg-[#ebf3ef] transition"
+                            title="Admin Edit loan record"
+                          >
+                            <Edit3 size={11} />
+                            <span>Edit</span>
+                          </button>
+                        </div>
+                        <div className="flex items-center gap-2 mt-0.5">
+                          <span className="text-[11px] text-[#718d84]">{l.group}</span>
+                          {l.note && <span className="text-xs text-[#718d84]">· {l.note}</span>}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <strong className="text-base font-extrabold text-[#11382f]">
+                          ₹{l.amount.toLocaleString('en-IN')}
+                        </strong>
+                        <button
+                          type="button"
+                          onClick={() => toggleExpand(l.name)}
+                          className="grid h-7 w-7 place-items-center rounded-lg text-[#6d8880] hover:bg-[#eef5f1] transition"
+                          aria-label={isExpanded ? 'Collapse' : 'Expand transactions'}
+                        >
+                          {isExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                        </button>
+                      </div>
                     </div>
-                    {l.note && (
-                      <span className="mt-1 block text-xs text-[#718d84]">
-                        {l.note}
-                      </span>
-                    )}
+
+                    {isExpanded && renderTransactions(l.name)}
                   </div>
-                  <strong className="text-base font-extrabold text-[#11382f]">
-                    {formatAmount(l.amount)}
-                  </strong>
-                </div>
-              ))}
+                )
+              })}
             </div>
           )}
         </section>
@@ -175,9 +265,14 @@ export default function LoansPage() {
         {/* Section 2: Advances given (PDF Page 9) */}
         <section className="rounded-3xl border border-[#e1e9e3] border-l-4 border-l-[#0b786e] bg-white p-5 sm:p-6 shadow-xs">
           <div className="flex items-center justify-between pb-4 border-b border-[#edf3f0]">
-            <h2 className="text-[17px] font-extrabold text-[#11382f]">
-              Advances given
-            </h2>
+            <div>
+              <h2 className="text-[17px] font-extrabold text-[#11382f]">
+                Advances given
+              </h2>
+              <span className="text-[11px] text-[#718d84]">
+                Tap any ledger to view underlying voucher transactions
+              </span>
+            </div>
             <strong className="text-[18px] font-extrabold text-[#0e655d]">
               {formatAmount(totalAdvancesGiven)}
             </strong>
@@ -189,34 +284,61 @@ export default function LoansPage() {
             </div>
           ) : (
             <div className="divide-y divide-[#edf3f0]">
-              {advancesGiven.map((a) => (
-                <div key={a.id || a.name} className="py-4 flex items-start justify-between group">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <strong className="block text-sm font-extrabold text-[#11382f]">
-                        {a.name}
-                      </strong>
-                      <button
-                        type="button"
-                        onClick={() => setEditingLoan({ id: a.id, name: a.name, current_balance: a.amount, group: 'Loans & Advances (Asset)', note: a.note })}
-                        className="opacity-75 group-hover:opacity-100 inline-flex items-center gap-1 rounded-md border border-[#cfded6] bg-[#f8faf9] px-2 py-0.5 text-[10px] font-bold text-[#0e655d] hover:bg-[#ebf3ef] transition"
-                        title="Admin Edit advance record"
-                      >
-                        <Edit3 size={11} />
-                        <span>Edit</span>
-                      </button>
+              {advancesGiven.map((a) => {
+                const isExpanded = expandedLedger === a.name
+                const count = activity.get(a.name.toLowerCase())?.count || 0
+
+                return (
+                  <div key={a.id || a.name} className="py-3">
+                    <div className="flex items-start justify-between group">
+                      <div className="flex-1 cursor-pointer" onClick={() => toggleExpand(a.name)}>
+                        <div className="flex items-center gap-2">
+                          <strong className="block text-sm font-extrabold text-[#11382f] hover:text-[#0e655d] transition">
+                            {a.name}
+                          </strong>
+                          {count > 0 && (
+                            <span className="rounded bg-[#e8f3ee] px-1.5 py-0.5 text-[10px] font-extrabold text-[#0e655d]">
+                              {count} tx
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setEditingLoan({ id: a.id, name: a.name, current_balance: a.amount, group: a.group, note: a.note })
+                            }}
+                            className="opacity-75 group-hover:opacity-100 inline-flex items-center gap-1 rounded-md border border-[#cfded6] bg-[#f8faf9] px-2 py-0.5 text-[10px] font-bold text-[#0e655d] hover:bg-[#ebf3ef] transition"
+                            title="Admin Edit advance record"
+                          >
+                            <Edit3 size={11} />
+                            <span>Edit</span>
+                          </button>
+                        </div>
+                        <div className="flex items-center gap-2 mt-0.5">
+                          <span className="text-[11px] text-[#718d84]">{a.group}</span>
+                          {a.note && <span className="text-xs text-[#718d84]">· {a.note}</span>}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <strong className="text-base font-extrabold text-[#11382f]">
+                          ₹{a.amount.toLocaleString('en-IN')}
+                        </strong>
+                        <button
+                          type="button"
+                          onClick={() => toggleExpand(a.name)}
+                          className="grid h-7 w-7 place-items-center rounded-lg text-[#6d8880] hover:bg-[#eef5f1] transition"
+                          aria-label={isExpanded ? 'Collapse' : 'Expand transactions'}
+                        >
+                          {isExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                        </button>
+                      </div>
                     </div>
-                    {a.note && (
-                      <span className="mt-1 block text-xs text-[#718d84]">
-                        {a.note}
-                      </span>
-                    )}
+
+                    {isExpanded && renderTransactions(a.name)}
                   </div>
-                  <strong className="text-base font-extrabold text-[#11382f]">
-                    {formatAmount(a.amount)}
-                  </strong>
-                </div>
-              ))}
+                )
+              })}
             </div>
           )}
         </section>

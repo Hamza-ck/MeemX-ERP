@@ -102,6 +102,8 @@ export default function DashboardPage() {
           operatingResultToday, operatingResultWeek, operatingResultMonth, operatingResultPrevMonth,
           sales7Days, sales7DaysTotal,
           operatingResultBasis,
+          operatingResultNote,
+          operatingResultApprox,
           currentMonthName, currentMonthFullName, prevMonthName, prevMonthFullName,
         } = calculated
 
@@ -127,6 +129,8 @@ export default function DashboardPage() {
           operatingResultMonth,
           operatingResultPrevMonth,
           operatingResultBasis,
+          operatingResultNote,
+          operatingResultApprox,
           sales7Days: last7,
           sales7DaysTotal,
           currentMonthName,
@@ -176,6 +180,13 @@ export default function DashboardPage() {
     const debtorsDetail = `They owe you · ${liveMetrics?.debtorsCount || 0}`
     const creditorsVal = formatMoney(liveMetrics?.creditorsSum || 0)
     const creditorsDetail = `You owe · ${liveMetrics?.creditorsCount || 0}`
+    // Explain a missing profit instead of a generic "incomplete", and flag estimates.
+    const profitDiff = (key, pVal, fallback) => {
+      if (pVal == null) return liveMetrics?.operatingResultNote?.[key] || 'Profit details incomplete'
+      const basis = fallback || liveMetrics?.operatingResultBasis?.[key] || 'Sales less item costs & expenses'
+      return liveMetrics?.operatingResultApprox?.[key] ? `≈ ${basis} · ${liveMetrics?.operatingResultNote?.[key] || 'estimate'}` : basis
+    }
+
     const stockVal = formatMoney(liveMetrics?.stockSum || 0)
     const loansVal = formatMoney(liveMetrics?.netLoans || 0)
 
@@ -185,7 +196,7 @@ export default function DashboardPage() {
       const eVal = liveMetrics?.expensesToday || 0
       return {
         sales: { value: formatMoney(sVal), diff: sVal > 0 ? 'Today revenue' : 'No sales today', isPositive: true },
-        profit: { value: pVal == null ? '—' : formatMoney(pVal), diff: pVal == null ? 'Profit details incomplete' : liveMetrics?.operatingResultBasis?.today || 'Sales less item costs & expenses', isPositive: pVal != null && pVal >= 0 },
+        profit: { value: pVal == null ? '—' : formatMoney(pVal), diff: profitDiff('today', pVal), isPositive: pVal != null && pVal >= 0 },
         expenses: { value: formatMoney(eVal), diff: eVal > 0 ? 'Today expenses' : 'No expenses', isPositive: false },
         debtors: { value: debtorsVal, detail: debtorsDetail },
         creditors: { value: creditorsVal, detail: creditorsDetail },
@@ -198,7 +209,7 @@ export default function DashboardPage() {
       const eVal = liveMetrics?.expensesWeek || 0
       return {
         sales: { value: formatMoney(sVal), diff: sVal > 0 ? 'Last 7 days' : 'No sales this week', isPositive: true },
-        profit: { value: pVal == null ? '—' : formatMoney(pVal), diff: pVal == null ? 'Profit details incomplete' : liveMetrics?.operatingResultBasis?.week || 'Sales less item costs & expenses', isPositive: pVal != null && pVal >= 0 },
+        profit: { value: pVal == null ? '—' : formatMoney(pVal), diff: profitDiff('week', pVal), isPositive: pVal != null && pVal >= 0 },
         expenses: { value: formatMoney(eVal), diff: eVal > 0 ? 'Weekly expenses' : 'No expenses', isPositive: false },
         debtors: { value: debtorsVal, detail: debtorsDetail },
         creditors: { value: creditorsVal, detail: creditorsDetail },
@@ -212,7 +223,7 @@ export default function DashboardPage() {
       const prevName = liveMetrics?.prevMonthFullName || 'Last month'
       return {
         sales: { value: formatMoney(sVal), diff: `${prevName} total`, isPositive: true },
-        profit: { value: pVal == null ? '—' : formatMoney(pVal), diff: pVal == null ? 'Profit details incomplete' : liveMetrics?.operatingResultBasis?.lastMonth || 'Sales less item costs & expenses', isPositive: pVal != null && pVal >= 0 },
+        profit: { value: pVal == null ? '—' : formatMoney(pVal), diff: profitDiff('lastMonth', pVal), isPositive: pVal != null && pVal >= 0 },
         expenses: { value: formatMoney(eVal), diff: `${prevName} expenses`, isPositive: false },
         debtors: { value: debtorsVal, detail: debtorsDetail },
         creditors: { value: creditorsVal, detail: creditorsDetail },
@@ -242,10 +253,10 @@ export default function DashboardPage() {
         profit: {
           value: pVal == null ? '—' : formatMoney(pVal),
           diff: pVal == null
-            ? 'Profit details incomplete'
+            ? profitDiff('month', pVal)
             : sVal === 0 && prevProfitVal != null
             ? `No ${currShort} profit yet · ${prevShort}: ${formatMoney(prevProfitVal)}`
-            : liveMetrics?.operatingResultBasis?.month || 'Sales less item costs & expenses',
+            : profitDiff('month', pVal),
           isPositive: pVal != null && pVal >= 0,
         },
         expenses: {

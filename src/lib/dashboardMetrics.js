@@ -1,16 +1,16 @@
-import { tallyLedgerCategory, isPurchaseGroup } from './tallyLedgerCategory.js'
+import { tallyLedgerCategory } from './tallyLedgerCategory.js'
 
-const dateKey = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 const lc = (value) => String(value || '').trim().toLowerCase()
-const round2 = (value) => Math.round((Number(value) + Number.EPSILON) * 100) / 100
+const dateKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100
 
-/** Resolve a ledger's category even when the stored one is the 'asset' default. */
-function categoryOf(ledger) {
-  const fromGroup = tallyLedgerCategory(ledger?.primary_group || ledger?.group)
-  return !ledger?.category || (ledger.category === 'asset' && fromGroup !== 'asset') ? fromGroup : ledger.category
+const isPurchaseGroup = (ledger) => {
+  const group = `${ledger.primary_group || ''} ${ledger.group || ''}`.toLowerCase()
+  return group.includes('purchase')
 }
+const categoryOf = (l) => l.category || tallyLedgerCategory(l.primary_group || l.group)
 
-function buildContext(ledgers = [], materials = [], parties = []) {
+function buildContext(ledgers = [], materials = [], parties = [], vouchers = []) {
   const ledgersByName = new Map(ledgers.filter((l) => l.name).map((l) => [lc(l.name), l]))
   const partyNames = new Set(parties.filter((p) => p.name).map((p) => lc(p.name)))
   // Tally's own average cost (closing value ÷ closing qty) beats a stored purchase rate,
@@ -26,7 +26,24 @@ function buildContext(ledgers = [], materials = [], parties = []) {
       if (m.sku) costByItem.set(lc(m.sku), cost)
     }
   }
-  return { ledgersByName, partyNames, costByItem }
+
+  // Items with no closing stock have no closing rate, which used to blank the whole month's profit.
+  // Fall back to the latest rate actually paid on a purchase voucher.
+  const lastPurchase = new Map()
+  for (const v of vouchers) {
+    if (v.deleted_at || v.voucher_type !== 'purchase' || !Array.isArray(v.items)) continue
+    const date = String(v.date || '').slice(0, 10)
+    for (const item of v.items) {
+      const qty = Number(item.qty)
+      const rate = Number(item.rate) || (qty > 0 ? (Number(item.amount) || 0) / qty : 0)
+      const key = lc(item.name)
+      if (!key || !(rate > 0)) continue
+      if (!lastPurchase.has(key) || date >= lastPurchase.get(key).date) lastPurchase.set(key, { date, rate })
+    }
+  }
+  const costOf = (item) => costByItem.get(lc(item.name)) ?? costByItem.get(lc(item.sku)) ?? lastPurchase.get(lc(item.name))?.rate ?? 0
+
+  return { ledgersByName, partyNames, costByItem, costOf }
 }
 
 /**
@@ -78,7 +95,7 @@ export function calculateDashboardMetrics(vouchers, ledgers, now = new Date(), {
   const currentMonthFullName = today.toLocaleDateString('en-IN', { month: 'long' })
   const prevMonthName = prevMonthDate.toLocaleDateString('en-IN', { month: 'short' })
   const prevMonthFullName = prevMonthDate.toLocaleDateString('en-IN', { month: 'long' })
-  const ctx = buildContext(ledgers, materials, parties)
+  const ctx = buildContext(ledgers, materials, parties, vouchers)
   const expenseNames = new Set(ledgers.filter((l) => categoryOf(l) === 'expense' && !isPurchaseGroup(l)).map((l) => lc(l.name)).filter(Boolean))
 
   const salesByDate = new Map()          // invoice totals net of credit notes
@@ -86,14 +103,17 @@ export function calculateDashboardMetrics(vouchers, ledgers, now = new Date(), {
   const tallyIncomeByDate = new Map()
   const tallyOpexByDate = new Map()
   const tallyPurchasesByDate = new Map()
-  const tallyItemCostByDate = new Map()
+  const itemCostByDate = new Map()
+  const costedIncomeByDate = new Map()
+  const uncostedIncomeByDate = new Map()
+  const uncostedCountByDate = new Map()
+  const unpostedSalesByDate = new Map()
+  const unpostedCountByDate = new Map()
+  const unknownCountByDate = new Map()
   const legacyCostByDate = new Map()
   const legacySalesByDate = new Map()
   const legacyExpensesByDate = new Map()
-  const incompleteDates = new Set()      // result cannot be trusted for these days
-  const missingItemCostDates = new Set() // only matters if the item-cost basis is used
-  const tallyItemSaleDates = new Set()
-  const tallyNoItemSaleDates = new Set()
+  const incompleteDates = new Set()      // locally keyed invoices without item costs
   const tallyActivityDates = new Set()
 
   for (const voucher of vouchers) {
@@ -113,40 +133,49 @@ export function calculateDashboardMetrics(vouchers, ledgers, now = new Date(), {
     }
 
     if (isTally) {
+      const saleLike = type === 'sales' || type === 'credit_note'
+      const direction = type === 'credit_note' ? -1 : 1
+      let posting = null
       if (voucher.ledger_entries.length === 0) {
-        incompleteDates.add(date)
+        // No postings were captured for this voucher, so its income/expense cannot be classified.
+        if (saleLike) add(unpostedSalesByDate, date, direction * amount)
+        add(unpostedCountByDate, date, 1)
       } else {
-        const posting = tallyPostings(voucher, ctx)
-        if (posting.unknown) incompleteDates.add(date)
+        posting = tallyPostings(voucher, ctx)
+        if (posting.unknown) add(unknownCountByDate, date, 1)
         add(tallyIncomeByDate, date, posting.income)
         add(tallyOpexByDate, date, posting.opex)
         add(tallyPurchasesByDate, date, posting.purchases)
         tallyActivityDates.add(date)
       }
-      if (type === 'sales' || type === 'credit_note') {
-        if (!hasItems) {
-          tallyNoItemSaleDates.add(date)
-        } else {
-          tallyItemSaleDates.add(date)
-          const direction = type === 'credit_note' ? -1 : 1
+      if (saleLike && posting) {
+        let cost = 0
+        let known = hasItems
+        if (hasItems) {
           for (const item of voucher.items) {
-            const cost = ctx.costByItem.get(lc(item.name)) ?? ctx.costByItem.get(lc(item.sku))
+            const unitCost = ctx.costOf(item)
             const qty = Number(item.qty)
-            if (!cost || !Number.isFinite(qty)) { missingItemCostDates.add(date); continue }
-            add(tallyItemCostByDate, date, direction * qty * cost)
+            if (!unitCost || !Number.isFinite(qty)) { known = false; break }
+            cost += direction * qty * unitCost
           }
+        }
+        if (known) {
+          add(costedIncomeByDate, date, posting.income)
+          add(itemCostByDate, date, cost)
+        } else {
+          add(uncostedIncomeByDate, date, posting.income)
+          add(uncostedCountByDate, date, 1)
         }
       }
       continue
     }
 
-    // Locally keyed vouchers (not from Tally): sale items carry their own cost_rate.
+    // Legacy (non-Tally) invoices: profit requires costs recorded on every item.
     if (type === 'sales') {
       add(legacySalesByDate, date, amount)
-      if (!hasItems) { incompleteDates.add(date); continue }
       let cost = 0
       let complete = true
-      for (const item of voucher.items) {
+      for (const item of voucher.items || []) {
         const rate = Number(item.cost_rate)
         const qty = Number(item.qty)
         if (item.cost_rate === undefined || item.cost_rate === null || item.cost_rate === '' || !Number.isFinite(qty) || !Number.isFinite(rate)) { complete = false; break }
@@ -176,29 +205,76 @@ export function calculateDashboardMetrics(vouchers, ledgers, now = new Date(), {
   }
 
   const periods = ['today', 'week', 'month', 'lastMonth']
-  const sales = {}, expenses = {}, results = {}, basis = {}
+  const sales = {}, expenses = {}, results = {}, basis = {}, notes = {}, approx = {}
+  const pct = (n) => `${Math.round(n * 100)}%`
   for (const period of periods) {
     sales[period] = sumPeriod(salesByDate, period)
     expenses[period] = sumPeriod(tallyOpexByDate, period) + sumPeriod(legacyExpensesByDate, period)
+    approx[period] = false
+    notes[period] = ''
 
     const hasTally = anyInPeriod(tallyActivityDates, period)
-    const hasActivity = hasTally || anyInPeriod(new Set(salesCountByDate.keys()), period) || anyInPeriod(new Set(legacyExpensesByDate.keys()), period)
-    const useItemCost = anyInPeriod(tallyItemSaleDates, period)
-    const mixed = useItemCost && anyInPeriod(tallyNoItemSaleDates, period)
-    const costMissing = useItemCost && anyInPeriod(missingItemCostDates, period)
-    basis[period] = hasTally
-      ? (useItemCost ? 'Tally net sales − item cost − expenses'
-        : anyInPeriod(tallyNoItemSaleDates, period) ? 'Tally net sales − purchases − expenses (no item data)'
-        : 'Tally accounts')
-      : 'Sales less item costs & expenses'
+    const hasLegacy = anyInPeriod(new Set(legacySalesByDate.keys()), period) || anyInPeriod(new Set(legacyExpensesByDate.keys()), period)
+    basis[period] = hasTally ? 'Tally accounts' : 'Sales less item costs & expenses'
 
-    if (!hasActivity || anyInPeriod(incompleteDates, period) || mixed || costMissing) {
+    if (!hasTally && !hasLegacy) {
       results[period] = null
+      notes[period] = 'No transactions in this period'
       continue
     }
-    const cogs = useItemCost ? sumPeriod(tallyItemCostByDate, period)
-      : anyInPeriod(tallyNoItemSaleDates, period) ? sumPeriod(tallyPurchasesByDate, period) : 0
-    const tallyNet = sumPeriod(tallyIncomeByDate, period) - cogs - sumPeriod(tallyOpexByDate, period)
+    if (hasLegacy && anyInPeriod(incompleteDates, period)) {
+      results[period] = null
+      notes[period] = 'Some invoices have no item cost details'
+      continue
+    }
+
+    let tallyNet = 0
+    if (hasTally) {
+      const income = sumPeriod(tallyIncomeByDate, period)
+      const opex = sumPeriod(tallyOpexByDate, period)
+      const purchases = sumPeriod(tallyPurchasesByDate, period)
+      const costedIncome = sumPeriod(costedIncomeByDate, period)
+      const uncostedIncome = sumPeriod(uncostedIncomeByDate, period)
+      const itemCost = sumPeriod(itemCostByDate, period)
+      const unposted = sumPeriod(unpostedSalesByDate, period)
+      const unpostedCount = sumPeriod(unpostedCountByDate, period)
+      const unknownCount = sumPeriod(unknownCountByDate, period)
+      const saleIncome = costedIncome + uncostedIncome
+      const coverage = saleIncome > 0 ? costedIncome / saleIncome : 0
+      const ratio = costedIncome > 0 ? itemCost / costedIncome : NaN
+
+      // Too many vouchers without postings: the result would be a guess, so say why instead.
+      if (sales[period] > 0 && unposted / sales[period] > 0.25) {
+        results[period] = null
+        notes[period] = `${unpostedCount} vouchers (${pct(unposted / sales[period])} of sales) have no ledger postings — run a full Tally sync`
+        continue
+      }
+
+      let cogs = 0
+      if (saleIncome > 0 && coverage >= 0.5 && ratio >= 0 && ratio <= 1.2) {
+        cogs = itemCost + ratio * uncostedIncome          // unknown-cost sales assumed at the period's own margin
+        basis[period] = 'Tally net sales − item cost − expenses'
+        if (uncostedIncome > 0) {
+          approx[period] = true
+          notes[period] = `Item cost known for ${pct(coverage)} of sales; the rest estimated`
+        }
+      } else if (saleIncome > 0 && purchases <= 0) {
+        // Nothing to base a cost on: showing the sales as pure profit would be wrong.
+        results[period] = null
+        notes[period] = 'No item costs or purchases found to work out cost of goods'
+        continue
+      } else if (saleIncome > 0) {
+        cogs = purchases                                  // not enough item costs: purchases basis
+        basis[period] = 'Tally net sales − purchases − expenses'
+        approx[period] = true
+        notes[period] = 'Item costs unavailable — purchases used as cost'
+      }
+      if (unpostedCount > 0 || unknownCount > 0) {
+        approx[period] = true
+        notes[period] = [notes[period], unpostedCount ? `${unpostedCount} vouchers without postings excluded` : '', unknownCount ? `${unknownCount} postings to unrecognised ledgers excluded` : ''].filter(Boolean).join(' · ')
+      }
+      tallyNet = income - cogs - opex
+    }
     results[period] = round2(tallyNet + sumPeriod(legacySalesByDate, period) - sumPeriod(legacyCostByDate, period) - sumPeriod(legacyExpensesByDate, period))
   }
 
@@ -221,6 +297,8 @@ export function calculateDashboardMetrics(vouchers, ledgers, now = new Date(), {
     expensesToday: expenses.today, expensesWeek: expenses.week, expensesMonth: expenses.month, expensesPrevMonth: expenses.lastMonth,
     operatingResultToday: results.today, operatingResultWeek: results.week, operatingResultMonth: results.month, operatingResultPrevMonth: results.lastMonth,
     operatingResultBasis: basis,
+    operatingResultNote: notes,
+    operatingResultApprox: approx,
     sales7Days, sales7DaysTotal,
     currentMonthName, currentMonthFullName, prevMonthName, prevMonthFullName,
   }
@@ -242,30 +320,56 @@ export function calculateExpenseMetrics(vouchers, ledgers, now = new Date()) {
 }
 
 /**
- * Month-to-date operating expenses by ledger, compared with the SAME number of days of
- * the previous month (a month-to-date total against a full month is not comparable).
- * Purchase accounts are cost of goods and are excluded. Cumulative ledger balances are
- * never used — they are year-to-date, not this month.
+ * Operating expenses by ledger, supporting 'thisMonth' and 'lastMonth' periods.
+ * When 'thisMonth', compares with the same number of days of the previous month.
+ * Purchase accounts are cost of goods and are excluded.
  */
-export function calculateExpenseBreakdown(vouchers, ledgers, now = new Date()) {
+export function calculateExpenseBreakdown(vouchers, ledgers, now = new Date(), options = {}) {
+  const period = options.period || 'thisMonth'
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
   const monthStart = dateKey(new Date(today.getFullYear(), today.getMonth(), 1))
   const todayKey = dateKey(today)
   const prevStartDate = new Date(today.getFullYear(), today.getMonth() - 1, 1)
-  const prevDaysInMonth = new Date(prevStartDate.getFullYear(), prevStartDate.getMonth() + 1, 0).getDate()
+  const prevMonthEnd = new Date(today.getFullYear(), today.getMonth(), 0)
+  const prevDaysInMonth = prevMonthEnd.getDate()
   const prevEndDate = new Date(prevStartDate.getFullYear(), prevStartDate.getMonth(), Math.min(today.getDate(), prevDaysInMonth))
   const prevStart = dateKey(prevStartDate)
   const prevEnd = dateKey(prevEndDate)
+  const fullPrevEnd = dateKey(prevMonthEnd)
 
-  const ctx = buildContext(ledgers)
+  const ctx = buildContext(ledgers, [], [], vouchers)
   const expenseNames = new Map(ledgers.filter((l) => categoryOf(l) === 'expense' && !isPurchaseGroup(l)).map((l) => [lc(l.name), l.name]))
   const current = new Map()
+  const vouchersByCategory = new Map()
   let previousTotal = 0
   let currentTotal = 0
 
-  const record = (date, name, amount) => {
-    if (inRange(date, monthStart, todayKey)) { add(current, name, amount); currentTotal += amount }
-    else if (inRange(date, prevStart, prevEnd)) previousTotal += amount
+  const isTargetRange = (date) => {
+    if (period === 'lastMonth') {
+      return inRange(date, prevStart, fullPrevEnd)
+    }
+    return inRange(date, monthStart, todayKey)
+  }
+
+  const record = (date, name, amount, voucher) => {
+    if (isTargetRange(date)) {
+      add(current, name, amount)
+      currentTotal += amount
+      if (voucher) {
+        const list = vouchersByCategory.get(name) || []
+        list.push({
+          date,
+          voucher_no: voucher.voucher_no,
+          voucher_type: voucher.voucher_type,
+          party_name: voucher.party_name,
+          narration: voucher.narration || '',
+          amount,
+        })
+        vouchersByCategory.set(name, list)
+      }
+    } else if (period !== 'lastMonth' && inRange(date, prevStart, prevEnd)) {
+      previousTotal += amount
+    }
   }
 
   for (const voucher of vouchers) {
@@ -273,16 +377,23 @@ export function calculateExpenseBreakdown(vouchers, ledgers, now = new Date()) {
     const date = (voucher.date || '').slice(0, 10)
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue
     if (voucher.source_system === 'tally' && Array.isArray(voucher.ledger_entries) && voucher.ledger_entries.length) {
-      for (const [name, amount] of tallyPostings(voucher, ctx).opexByLedger) record(date, name, amount)
+      for (const [name, amount] of tallyPostings(voucher, ctx).opexByLedger) {
+        record(date, name, amount, voucher)
+      }
     } else if (voucher.voucher_type === 'payment' && expenseNames.has(lc(voucher.party_name))) {
-      record(date, expenseNames.get(lc(voucher.party_name)), Number(voucher.amount) || 0)
+      record(date, expenseNames.get(lc(voucher.party_name)), Number(voucher.amount) || 0, voucher)
     }
   }
 
   const categories = [...current.entries()]
-    .map(([name, amount]) => ({ name, amount: round2(amount) }))
+    .map(([name, amount]) => ({
+      name,
+      amount: round2(amount),
+      vouchers: (vouchersByCategory.get(name) || []).sort((a, b) => b.date.localeCompare(a.date)),
+    }))
     .filter((c) => Math.abs(c.amount) >= 0.005)
     .sort((a, b) => b.amount - a.amount)
+
   const changePct = previousTotal > 0 ? Math.round(((currentTotal - previousTotal) / previousTotal) * 1000) / 10 : null
   return { total: round2(currentTotal), previousTotal: round2(previousTotal), changePct, categories }
 }
