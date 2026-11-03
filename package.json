@@ -9,7 +9,7 @@
     "tally:discover": "node connector/sync.mjs discover",
     "build": "vite build",
     "lint": "oxlint",
-    "test": "node --test --test-force-exit tests/*.test.mjs tests/test_connector.mjs",
+    "test": "node --test tests/test_connector.mjs && node --test --test-force-exit tests/*.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

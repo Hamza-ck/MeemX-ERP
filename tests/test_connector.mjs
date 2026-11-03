@@ -161,7 +161,7 @@ function startFakeTally(responseOverride) {
 function stopFakeTally() {
   return new Promise((resolve) => {
     if (fakeTallyServer) {
-      fakeTallyServer.close(resolve)
+      fakeTallyServer.closeAllConnections?.(); fakeTallyServer.close(resolve)
     } else {
       resolve()
     }
