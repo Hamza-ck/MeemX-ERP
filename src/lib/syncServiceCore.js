@@ -169,6 +169,22 @@ export function createSyncService({
     }
   }
 
+  /** Tally's Profit & Loss rows (small), kept as one settings entry the dashboard reads. */
+  async function pullPnl() {
+    try {
+      const since = new Date(now().getTime() - 120 * 86_400_000).toISOString().slice(0, 10)
+      const { data, error } = await cloud.from('tally_pnl_periods').select('*').gte('period_end', since)
+      if (error || !Array.isArray(data)) return false
+      const value = JSON.stringify(data)
+      if ((await database.settings.get('tally_pnl'))?.value === value) return false
+      await database.settings.put({ key: 'tally_pnl', value })
+      return true
+    } catch (error) {
+      logError('Profit & Loss sync skipped:', error)
+      return false
+    }
+  }
+
   async function pushSharedSetting(key, rawValue) {
     const spec = SHARED_SETTINGS.find((item) => item.key === key)
     if (!spec || !isConfigured) return false
@@ -332,7 +348,7 @@ export function createSyncService({
         await database.settings.put({ key: 'pending_cloud_deletes', value: '[]' })
       }
 
-      const settingsChanged = await pullSharedSettings(role)
+      const settingsChanged = (await pullSharedSettings(role)) || (await pullPnl())
       if (cloudVersion) await database.settings.put({ key: 'cloud_data_version', value: cloudVersion })
       const nowIso = now().toISOString()
       await database.settings.put({ key: 'last_cloud_sync', value: nowIso })

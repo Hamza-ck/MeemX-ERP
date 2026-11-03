@@ -48,6 +48,7 @@ class MockQuery {
   select() { return this }
   order() { return this }
   eq(field, value) { this.filters.push([field, value]); return this }
+  gte() { return this }   // real Supabase supports range filters; the fake returns the snapshot as is
   limit() { return this }
   range(from, to) { this.fromRow = from; this.toRow = to; return this }
   upsert(payload) { this.mode = 'upsert'; this.payload = payload; return this }
@@ -408,5 +409,20 @@ describe('live sync', () => {
     await build(database, cloud).syncFromSupabase()
     assert.equal((await database.settings.get('owner_permissions')).value, '{"sales":false,"profit":false}')
     assert.equal((await database.settings.get('card_order')).value, '["debtors","sales"]')
+  })
+})
+
+describe("Tally's Profit & Loss reaches the device", () => {
+  it('stores the rows the dashboard reads, and only changes them when they change', async () => {
+    const database = new MemoryDatabase(emptyTables(), [{ key: 'pending_cloud_deletes', value: '[]' }])
+    const rows = [{ company: 'Co', period_start: '2026-10-01', period_end: '2026-10-31', net_profit: 74612.57 }]
+    const cloud = mockCloud({ role: 'owner', snapshot: {
+      accounting_refresh_state: { data: { last_data_change_at: 'p1' }, error: null },
+      parties: { data: [], error: null }, ledgers: { data: [], error: null }, materials: { data: [], error: null }, vouchers: { data: [], error: null },
+      tally_pnl_periods: { data: rows, error: null },
+    } })
+    const service = createSyncService({ cloud, database, isConfigured: true, dispatchUpdates: () => {}, logError: () => {} })
+    await service.syncFromSupabase()
+    assert.deepEqual(JSON.parse((await database.settings.get('tally_pnl')).value), rows)
   })
 })

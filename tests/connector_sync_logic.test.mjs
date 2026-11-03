@@ -108,3 +108,21 @@ describe('upload retry safety', () => {
     assert.equal(n, 1)
   })
 })
+
+describe('uploading Profit & Loss', () => {
+  it('upserts one row per company + period and fails loudly if the server rejects it', async () => {
+    const { upsertPnl } = await import('../connector/supabase_client.mjs')
+    const sent = []
+    const ok = async (url, init) => { sent.push({ url, init }); return { ok: true, status: 201, text: async () => '' } }
+    const record = { company: 'Co', period_start: '2026-10-01', period_end: '2026-10-31', sales: 1, direct_income: 0, opening_stock: 2, purchases: 3, direct_expenses: 0,
+      closing_stock: 4, cogs: 1, gross_profit: 0, indirect_expenses: 0, indirect_income: 0, net_profit: 0, junk: 'ignored' }
+    await upsertPnl({ url: 'https://x.supabase.co', anonKey: 'k' }, 'tok', record, { source: 'excel' }, ok)
+    assert.match(sent[0].url, /tally_pnl_periods\?on_conflict=company,period_start,period_end$/)
+    assert.equal(sent[0].init.headers.Prefer, 'resolution=merge-duplicates,return=minimal')
+    const body = JSON.parse(sent[0].init.body)
+    assert.equal(body.source, 'excel')
+    assert.equal(body.junk, undefined)
+    const denied = async () => ({ ok: false, status: 403, text: async () => 'new row violates row-level security policy' })
+    await assert.rejects(() => upsertPnl({ url: 'https://x', anonKey: 'k' }, 't', record, {}, denied), /HTTP 403.*row-level security/)
+  })
+})

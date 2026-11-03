@@ -222,3 +222,22 @@ export class EdgeFunctionError extends Error {
     this.body = body
   }
 }
+
+const PNL_FIELDS = ['company', 'period_start', 'period_end', 'sales', 'direct_income', 'opening_stock', 'purchases', 'direct_expenses',
+  'closing_stock', 'cogs', 'gross_profit', 'indirect_expenses', 'indirect_income', 'net_profit']
+
+/** Store one validated Profit & Loss period (insert, or replace the same company+period). */
+export async function upsertPnl(config, accessToken, record, { source = 'connector' } = {}, fetchFn = globalThis.fetch) {
+  const body = Object.fromEntries(PNL_FIELDS.map((field) => [field, record[field]]))
+  const res = await fetchFn(`${config.url}/rest/v1/tally_pnl_periods?on_conflict=company,period_start,period_end`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'apikey': config.anonKey,
+      'Content-Type': 'application/json',
+      'Prefer': 'resolution=merge-duplicates,return=minimal',
+    },
+    body: JSON.stringify({ ...body, source, fetched_at: new Date().toISOString() }),
+  })
+  if (!res.ok) throw new Error(`Could not save Profit & Loss (HTTP ${res.status}): ${(await res.text().catch(() => '')).slice(0, 200)}`)
+}

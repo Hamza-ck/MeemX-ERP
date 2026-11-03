@@ -94,7 +94,9 @@ export default function DashboardPage() {
           .reduce((s, l) => s + (Number(l.current_balance) || 0), 0)
 
         // Keep dashboard date totals in one pass through voucher history.
-        const calculated = calculateDashboardMetrics(vouchers, ledgers, new Date(), { materials, parties })
+        let pnl = []
+        try { pnl = JSON.parse((await accDb.settings.get('tally_pnl'))?.value || '[]') } catch { pnl = [] }
+        const calculated = calculateDashboardMetrics(vouchers, ledgers, new Date(), { materials, parties, pnl })
         const aging = computeDebtorAging(parties, vouchers)
         const {
           salesToday, salesWeek, salesMonth, salesPrevMonth,
@@ -103,6 +105,7 @@ export default function DashboardPage() {
           sales7Days, sales7DaysTotal,
           operatingResultBasis,
           operatingResultNote,
+          operatingResultDetail,
           operatingResultApprox,
           currentMonthName, currentMonthFullName, prevMonthName, prevMonthFullName,
         } = calculated
@@ -130,6 +133,7 @@ export default function DashboardPage() {
           operatingResultPrevMonth,
           operatingResultBasis,
           operatingResultNote,
+          operatingResultDetail,
           operatingResultApprox,
           sales7Days: last7,
           sales7DaysTotal,
@@ -180,11 +184,15 @@ export default function DashboardPage() {
     const debtorsDetail = `They owe you · ${liveMetrics?.debtorsCount || 0}`
     const creditorsVal = formatMoney(liveMetrics?.creditorsSum || 0)
     const creditorsDetail = `You owe · ${liveMetrics?.creditorsCount || 0}`
-    // Explain a missing profit instead of a generic "incomplete", and flag estimates.
-    const profitDiff = (key, pVal, fallback) => {
-      if (pVal == null) return liveMetrics?.operatingResultNote?.[key] || 'Profit details incomplete'
-      const basis = fallback || liveMetrics?.operatingResultBasis?.[key] || 'Sales less item costs & expenses'
-      return liveMetrics?.operatingResultApprox?.[key] ? `≈ ${basis} · ${liveMetrics?.operatingResultNote?.[key] || 'estimate'}` : basis
+    // Show the arithmetic so the profit can be checked against Tally: Sales − Cost of sales − Expenses.
+    const profitDiff = (key, pVal) => {
+      const d = liveMetrics?.operatingResultDetail?.[key]
+      if (pVal == null || !d) return liveMetrics?.operatingResultNote?.[key] || 'No transactions in this period'
+      const other = d.otherIncome ? ` + ${formatMoney(d.otherIncome)} other income` : ''
+      const line = d.source === 'tally'
+        ? `${formatMoney(d.sales)} sales − ${formatMoney(d.cost)} cost of sales − ${formatMoney(d.expenses)} expenses${other} · Tally P&L${d.fetchedAt ? ' as of ' + new Date(d.fetchedAt).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) : ''}`
+        : `Estimated from vouchers: ${formatMoney(d.sales)} sales − ${formatMoney(d.cost)} item cost − ${formatMoney(d.expenses)} expenses (Tally P&L not synced yet)`
+      return liveMetrics?.operatingResultApprox?.[key] ? `${line} · ⚠ ${liveMetrics.operatingResultNote[key]}` : line
     }
 
     const stockVal = formatMoney(liveMetrics?.stockSum || 0)

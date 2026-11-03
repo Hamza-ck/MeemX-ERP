@@ -130,7 +130,7 @@ export function buildExportRequest(reportId, company, opts = {}) {
 
   // EXPORTFORMAT ensures Tally wraps the response in <TALLYMESSAGE> blocks
   // containing VOUCHER/LEDGER/STOCKITEM elements.
-  const exportId = reportId === 'Day Book' ? 'DayBook' : reportId
+  const exportId = reportId === 'Day Book' ? 'DayBook' : reportId === 'Profit & Loss' ? 'Profit and Loss' : reportId
   const xml = [
     '<ENVELOPE>',
     '  <HEADER>',

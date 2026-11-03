@@ -137,6 +137,15 @@ Each `incremental` run reads from (last successful run − 7 days) to today. **O
 - Orders, delivery/receipt notes, stock journals, memorandum, optional and cancelled vouchers are not imported as sales/purchases. Credit/debit notes import as returns.
 - A lock file prevents two runs overlapping (e.g. Task Scheduler plus `--loop`).
 
+### Profit comes from Tally's own Profit & Loss
+
+The dashboard does not rebuild cost of goods sold. Tally computes it (`Cost of Sales = Opening Stock + Purchases + Direct Expenses − Closing Stock`), so the connector reads Tally's **Profit & Loss** for the windows the dashboard shows (today, last 7 days, this month, last month) and stores them in `tally_pnl_periods` (migration `20261103120000_tally_pnl_periods.sql`). Every sync step refreshes them at most every 10 minutes.
+
+- Nothing is stored unless the report adds up (cost of sales, gross profit and nett profit must reconcile to the rupee), so a layout the parser does not recognise is rejected, not shown as a wrong profit. The rejected response is saved in `connector/samples/`.
+- `node connector/sync.mjs pnl --from 2026-10-01 --to 2026-10-31` fetches one period, saves the raw XML, validates and stores it.
+- `node connector/sync.mjs pnl-import --file PandL.xls` loads a P&L exported from Tally as Excel.
+- If Tally's P&L for a window has not been synced yet, the dashboard falls back to an estimate from vouchers and says so on the card. When the app's voucher sales disagree with Tally's sales by more than 2%, the card warns (usually duplicate or missing vouchers).
+
 ### 4. Windows Task Scheduler Setup (5 Steps)
 To automatically run the connector unattended on the shop PC:
 1. Open **Task Scheduler** on Windows (`taskschd.msc`).

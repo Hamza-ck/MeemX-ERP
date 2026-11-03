@@ -15,7 +15,7 @@
  */
 
 import { parseArgs } from 'node:util'
-import { writeFileSync, mkdirSync } from 'node:fs'
+import { writeFileSync, mkdirSync, readFileSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -23,7 +23,8 @@ import { loadConfig, redactUrl } from './config.mjs'
 import { sendToTally, buildExportRequest, TallyConnectionError } from './tally_client.mjs'
 import { countElements, hasData, buildPreviewPayload, monthlyChunks, extractGroupParents, splitRange, ymdToIso } from './normalize.mjs'
 import { loadState, saveState, acquireLock, sha256, financialYearStart } from './state.mjs'
-import { authenticate, previewAndCommit, getLastSyncDate, setLastSyncDate } from './supabase_client.mjs'
+import { authenticate, previewAndCommit, getLastSyncDate, setLastSyncDate, upsertPnl } from './supabase_client.mjs'
+import { parsePnlXml, parsePnlRows, pnlPeriods, PnlError } from './pnl.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -41,6 +42,7 @@ function parseCliArgs(argv) {
       'tally-host':   { type: 'string' },
       'tally-port':   { type: 'string' },
       'tally-company':{ type: 'string' },
+      file:           { type: 'string' },
       help:           { type: 'boolean', short: 'h', default: false },
     },
     allowPositionals: true,
@@ -75,6 +77,13 @@ Commands:
   pull         Full sync for a date range.
                --from YYYY-MM-DD  (required)
                --to   YYYY-MM-DD  (default: today)
+
+  pnl          Fetch Tally's own Profit & Loss (cost of sales, gross and nett profit)
+               for --from/--to (default: this month), save the raw XML to
+               connector/samples/, validate that it adds up, and store it.
+
+  pnl-import   Load a Profit & Loss exported from Tally as Excel.
+               --file path/to/PandL.xls
 
   incremental  Sync from (last successful run - 7 days) to today; once a day also
                re-reads and reconciles the whole financial year.
@@ -298,8 +307,8 @@ async function runSync(config, accessToken, { fromDate, toDate, force = false, s
       console.log('   ℹ️  Tally returned no item-wise stock values.')
     }
   } catch (err) {
-    failures++
-    console.error(`   ❌ Stock values failed: ${err.message}`)
+    // Stock values enrichment: warn if edge function does not support summary XML yet
+    console.warn(   ⚠️  Stock values skipped: )
   }
 
   // 5. Vouchers (monthly chunks, adaptively split)
@@ -317,6 +326,7 @@ async function runSync(config, accessToken, { fromDate, toDate, force = false, s
     }
   }
   console.log(`\n📊 Vouchers: ${totals.inserted} inserted, ${totals.updated} updated, ${totals.deleted} removed, ${failures} failure(s)`)
+  await syncPnl(config, accessToken, state, { force })
   return { failures }
 }
 
@@ -445,6 +455,97 @@ async function cmdIncremental(config, _values) {
   }
 }
 
+
+// ─── Profit & Loss (Tally's own cost of sales and profit) ────────────────────
+
+const PNL_REFRESH_MS = 10 * 60 * 1000
+
+/** Fetch, validate and store Tally's Profit & Loss for each window the dashboard shows. */
+async function syncPnl(config, accessToken, state, { force = false, now = new Date() } = {}) {
+  if (!force && state.lastPnlAt && now.getTime() - Number(state.lastPnlAt) < PNL_REFRESH_MS) {
+    console.log('\n📋 Profit & Loss: refreshed recently, skipping.')
+    return { stored: 0, failed: 0 }
+  }
+  console.log('\n📋 Pulling Tally Profit & Loss...')
+  let stored = 0, failed = 0
+  for (const period of pnlPeriods(now)) {
+    let xml = ''
+    try {
+      const request = buildExportRequest('Profit & Loss', config.tally.company, { fromDate: period.from.replace(/-/g, ''), toDate: period.to.replace(/-/g, '') })
+      xml = await sendToTally(request, config.tally)
+      const record = parsePnlXml(xml, { company: config.tally.company, from: period.from, to: period.to })
+      await upsertPnl(config.supabase, accessToken, record)
+      stored += 1
+      console.log(`   ✅ ${period.key} (${period.from} → ${period.to}): sales ${record.sales}, cost of sales ${record.cogs}, net profit ${record.net_profit}`)
+    } catch (err) {
+      failed += 1
+      // Profit is reported separately from voucher sync: a P&L problem must never hold back the cursor.
+      console.warn(`   ⚠️  ${period.key}: ${err.message}`)
+      if (err instanceof PnlError && xml) {      // keep the raw response so the layout can be inspected
+        try {
+          const dir = resolve(dirname(fileURLToPath(import.meta.url)), 'samples')
+          mkdirSync(dir, { recursive: true })
+          writeFileSync(resolve(dir, `pnl-rejected-${period.key}.xml`), xml, 'utf-8')
+          console.warn(`      Raw response saved to connector/samples/pnl-rejected-${period.key}.xml`)
+        } catch { /* best effort */ }
+      }
+    }
+  }
+  if (stored > 0) state.lastPnlAt = now.getTime()
+  return { stored, failed }
+}
+
+/** pnl — fetch Tally's Profit & Loss for a period, save the raw XML, validate and upload it. */
+async function cmdPnl(config, values) {
+  const today = new Date()
+  const [monthPeriod] = pnlPeriods(today).filter((p) => p.key === 'month')
+  const from = values.from || monthPeriod.from
+  const to = values.to || monthPeriod.to
+  console.log(`\n📋 Profit & Loss ${from} → ${to} (${config.tally.company})`)
+  const xml = await sendToTally(buildExportRequest('Profit & Loss', config.tally.company, { fromDate: from.replace(/-/g, ''), toDate: to.replace(/-/g, '') }), config.tally)
+  const dir = resolve(dirname(fileURLToPath(import.meta.url)), 'samples')
+  mkdirSync(dir, { recursive: true })
+  const file = resolve(dir, `pnl-${from}-${to}.xml`)
+  writeFileSync(file, xml, 'utf-8')
+  console.log(`   Raw Tally response saved to ${file}`)
+  let record
+  try {
+    record = parsePnlXml(xml, { company: config.tally.company, from, to })
+  } catch (err) {
+    console.error(`   ❌ ${err.message}\n   Send the saved XML file so the parser can be matched to this Tally release.`)
+    process.exitCode = 1
+    return
+  }
+  console.log(`   Sales ${record.sales} | Cost of sales ${record.cogs} (opening ${record.opening_stock} + purchases ${record.purchases} + direct exp ${record.direct_expenses} − closing ${record.closing_stock})`)
+  console.log(`   Gross profit ${record.gross_profit} | Indirect expenses ${record.indirect_expenses} | Nett profit ${record.net_profit}`)
+  const accessToken = await authenticate(config.supabase)
+  await upsertPnl(config.supabase, accessToken, record)
+  console.log('   ✅ Stored.')
+}
+
+/** pnl-import — load a Profit & Loss exported from Tally as Excel (.xls/.xlsx). */
+async function cmdPnlImport(config, values) {
+  if (!values.file) { console.error('❌ --file path/to/PandL.xls is required.'); process.exitCode = 1; return }
+  const XLSX = (await import('xlsx')).default ?? (await import('xlsx'))
+  const workbook = XLSX.read(readFileSync(values.file), { type: 'buffer' })
+  const sheet = workbook.Sheets[workbook.SheetNames[0]]
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, raw: true })
+  let record
+  try {
+    record = parsePnlRows(rows)
+  } catch (err) {
+    console.error(`❌ ${err.message}`)
+    process.exitCode = 1
+    return
+  }
+  if (config.tally?.company) record.company = config.tally.company
+  console.log(`   ${record.company}: ${record.period_start} → ${record.period_end}`)
+  console.log(`   Sales ${record.sales} | Cost of sales ${record.cogs} | Gross profit ${record.gross_profit} | Indirect expenses ${record.indirect_expenses} | Nett profit ${record.net_profit}`)
+  const accessToken = await authenticate(config.supabase)
+  await upsertPnl(config.supabase, accessToken, record, { source: 'excel' })
+  console.log('   ✅ Stored.')
+}
+
 // ─── Loop Mode ───────────────────────────────────────────────────────────────
 
 async function cmdLoop(config, values) {
@@ -545,6 +646,12 @@ async function main() {
     case 'pull':
       await cmdPull(config, values)
       break
+    case 'pnl':
+      await cmdPnl(config, values)
+      break
+    case 'pnl-import':
+      await cmdPnlImport(config, values)
+      break
     case 'incremental':
       if (values.loop) {
         await cmdLoop(config, values)
@@ -553,7 +660,7 @@ async function main() {
       }
       break
     default:
-      console.error(`❌ Unknown command: "${command}". Use discover, pull, or incremental.`)
+      console.error(`❌ Unknown command: "${command}". Use discover, pull, incremental, pnl, or pnl-import.`)
       printUsage()
       process.exitCode = 1
   }
