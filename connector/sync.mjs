@@ -308,7 +308,7 @@ async function runSync(config, accessToken, { fromDate, toDate, force = false, s
     }
   } catch (err) {
     // Stock values enrichment: warn if edge function does not support summary XML yet
-    console.warn(   ⚠️  Stock values skipped: )
+    console.warn('   ⚠️  Stock values skipped: ' + err.message)
   }
 
   // 5. Vouchers (monthly chunks, adaptively split)
