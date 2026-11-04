@@ -139,6 +139,28 @@ describe('expense breakdown', () => {
     const r = calculateExpenseBreakdown([pay('2026-10-05', 'Rent', 100)], ledgers, now)
     assert.equal(r.changePct, null)
   })
+
+  it('correctly categorizes and aggregates sub-groups under Indirect Expenses', () => {
+    const customLedgers = [
+      { name: 'Hamza', group: 'Staff', primary_group: 'Indirect Expenses', category: 'asset' },
+      { name: 'Shahbaz', group: 'Staff', primary_group: 'Indirect Expenses', category: 'asset' },
+      { name: 'Rent Shop 1', group: 'Shop Rent', primary_group: 'Indirect Expenses', category: 'asset' },
+      { name: 'General Maintenance', group: 'Maintenance', category: 'asset' },
+    ]
+    const customVouchers = [
+      pay('2026-10-05', 'Hamza', 10000),
+      pay('2026-10-06', 'Shahbaz', 8200),
+      pay('2026-10-07', 'Rent Shop 1', 11600),
+      pay('2026-10-08', 'General Maintenance', 9740),
+    ]
+    const r = calculateExpenseBreakdown(customVouchers, customLedgers, now)
+    assert.equal(r.total, 39540)
+    assert.deepEqual(r.categories.map((c) => ({ name: c.name, amount: c.amount })), [
+      { name: 'Staff', amount: 18200 },
+      { name: 'Shop Rent', amount: 11600 },
+      { name: 'Maintenance', amount: 9740 },
+    ])
+  })
 })
 
 describe('debtor ageing', () => {

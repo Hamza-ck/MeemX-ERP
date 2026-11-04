@@ -92,7 +92,7 @@ export function buildExportRequest(reportId, company, opts = {}) {
   // the silent field omissions caused by `FETCH *` on some Tally releases.
   if (isVoucherCollection || isStockItems || isLedgerList || isGroupList) {
     const colType = isVoucherCollection ? 'Voucher' : isStockItems ? 'StockItem' : isGroupList ? 'Group' : 'Ledger'
-    const collectionName = isVoucherCollection ? 'Tally Vouchers' : reportId
+    const collectionName = isVoucherCollection ? 'Tally Vouchers' : isGroupList ? 'GroupCollection' : reportId
     const fetchMethods = isVoucherCollection
       ? ['Date', 'VoucherNumber', 'VoucherTypeName', 'Amount', 'MasterID', 'GUID', 'PartyLedgerName', 'Narration', 'Reference', 'AllLedgerEntries.*', 'LedgerEntries.*', 'AllInventoryEntries.*', 'InventoryEntries.*']
       : isStockItems
@@ -118,7 +118,7 @@ export function buildExportRequest(reportId, company, opts = {}) {
       '          <COLLECTION NAME="' + escapeXml(collectionName) + '">',
       '            <TYPE>' + colType + '</TYPE>',
       '            <FETCH>' + fetchMethods.join(', ') + '</FETCH>',
-      ...(!isVoucherCollection ? fetchMethods.map((method) => '            <NATIVEMETHOD>' + method + '</NATIVEMETHOD>') : []),
+      ...(!isVoucherCollection && !isGroupList ? fetchMethods.map((method) => '            <NATIVEMETHOD>' + method + '</NATIVEMETHOD>') : []),
       '          </COLLECTION>',
       '        </TDLMESSAGE>',
       '      </TDL>',

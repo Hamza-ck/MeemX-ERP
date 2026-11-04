@@ -8,7 +8,13 @@ const isPurchaseGroup = (ledger) => {
   const group = `${ledger.primary_group || ''} ${ledger.group || ''}`.toLowerCase()
   return group.includes('purchase')
 }
-const categoryOf = (l) => l.category || tallyLedgerCategory(l.primary_group || l.group)
+const categoryOf = (l) => {
+  const primaryCat = l?.primary_group ? tallyLedgerCategory(l.primary_group) : null
+  if (primaryCat) return primaryCat
+  const groupCat = l?.group ? tallyLedgerCategory(l.group) : null
+  if (groupCat && groupCat !== 'asset') return groupCat
+  return l?.category || groupCat || 'asset'
+}
 
 function buildContext(ledgers = [], materials = [], parties = [], vouchers = []) {
   const ledgersByName = new Map(ledgers.filter((l) => l.name).map((l) => [lc(l.name), l]))
@@ -68,7 +74,8 @@ function tallyPostings(voucher, ctx) {
       if (isPurchaseGroup(ledger)) out.purchases += signed
       else {
         out.opex += signed
-        out.opexByLedger.set(ledger.name, (out.opexByLedger.get(ledger.name) || 0) + signed)
+        const categoryName = (ledger.group && !/^indirect expenses$|^direct expenses$/i.test(ledger.group)) ? ledger.group : ledger.name;
+        out.opexByLedger.set(categoryName, (out.opexByLedger.get(categoryName) || 0) + signed);
       }
     }
   }
@@ -373,7 +380,9 @@ export function calculateExpenseBreakdown(vouchers, ledgers, now = new Date(), o
         record(date, name, amount, voucher)
       }
     } else if (voucher.voucher_type === 'payment' && expenseNames.has(lc(voucher.party_name))) {
-      record(date, expenseNames.get(lc(voucher.party_name)), Number(voucher.amount) || 0, voucher)
+      const ldg = ctx.ledgersByName.get(lc(voucher.party_name));
+      const catName = (ldg?.group && !/^indirect expenses$|^direct expenses$/i.test(ldg.group)) ? ldg.group : (ldg?.name || expenseNames.get(lc(voucher.party_name)));
+      record(date, catName, Number(voucher.amount) || 0, voucher);
     }
   }
 

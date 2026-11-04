@@ -27,6 +27,7 @@ export function tallyLedgerCategory(group) {
   if (name.includes('income') || name.includes('sales account')) return 'income'
   if (/\(asset\)|advance|deposit|debtor|customer|bank account|cash|stock|fixed asset|investment|current asset/.test(name)) return 'asset'
   if (/liabilit|creditor|supplier|capital|loan|provision|duties|tax|reserve|surplus|bank od|overdraft/.test(name)) return 'liability'
+  if (/rent|maintenance|salaries|salary|staff|welfare|brokerage|electricity|stationary|stationery|depreciation/.test(name)) return 'expense'
   return 'asset'
 }
 
