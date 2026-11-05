@@ -31,11 +31,11 @@ describe('state + financial year', () => {
   })
   it('round-trips state and tolerates a missing/corrupt file', () => {
     const file = join(dir(), 's.json')
-    assert.deepEqual(loadState(file), { lastFullSyncDate: null, hashes: {} })
+    assert.deepEqual(loadState(file), { lastFullSyncDate: null, hashes: {}, pushedAt: {}, lastPnlAt: null })
     saveState({ lastFullSyncDate: '2026-10-31', hashes: { masters: sha256('x') } }, file)
     assert.equal(loadState(file).lastFullSyncDate, '2026-10-31')
     writeFileSync(file, '{not json')
-    assert.deepEqual(loadState(file), { lastFullSyncDate: null, hashes: {} })
+    assert.deepEqual(loadState(file), { lastFullSyncDate: null, hashes: {}, pushedAt: {}, lastPnlAt: null })
   })
 })
 
@@ -124,5 +124,21 @@ describe('uploading Profit & Loss', () => {
     assert.equal(body.junk, undefined)
     const denied = async () => ({ ok: false, status: 403, text: async () => 'new row violates row-level security policy' })
     await assert.rejects(() => upsertPnl({ url: 'https://x', anonKey: 'k' }, 't', record, {}, denied), /HTTP 403.*row-level security/)
+  })
+})
+
+describe('connector keeps debtors current', () => {
+  it('asks Tally for ledger balances as on an explicit date range, not the screen period', async () => {
+    const { buildExportRequest } = await import('../connector/tally_client.mjs')
+    const xml = buildExportRequest('List of Accounts', 'Co', { fromDate: '20260401', toDate: '20261103' })
+    assert.match(xml, /<SVFROMDATE TYPE="Date">1-Apr-2026<\/SVFROMDATE>/)
+    assert.match(xml, /<SVTODATE TYPE="Date">3-Nov-2026<\/SVTODATE>/)
+  })
+  it('persists upload times and the P&L throttle, so a scheduled (non-loop) run does not forget them', () => {
+    const file = join(dir(), 's.json')
+    saveState({ lastFullSyncDate: '2026-11-03', hashes: { masters: 'h' }, pushedAt: { masters: 123 }, lastPnlAt: 456 }, file)
+    const back = loadState(file)
+    assert.equal(back.pushedAt.masters, 123)
+    assert.equal(back.lastPnlAt, 456)
   })
 })

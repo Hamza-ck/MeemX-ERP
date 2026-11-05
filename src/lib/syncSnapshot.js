@@ -14,6 +14,7 @@ export function buildEntitySnapshot(
   suppressedCloudIds = new Set(),
   remoteDeletedIds = new Set(),
   naturalKey = null,
+  cloudOwnedFields = [],
 ) {
   const localByCloudId = new Map()
   for (const row of localRows) {
@@ -39,7 +40,17 @@ export function buildEntitySnapshot(
       localRow = adoptableByKey.get(key)
       if (localRow) adoptableByKey.delete(key)
     }
-    if (localRow?.local_dirty) continue
+    if (localRow?.local_dirty) {
+      // The browser has unsynced edits, but some fields belong to Tally (balances, stock). Those must
+      // keep following the cloud, otherwise one dirty row freezes at its old balance indefinitely.
+      if (cloudOwnedFields.length) {
+        const fresh = normalize(cloudRow, index)
+        const merged = { ...localRow, cloud_id: cloudRow.id }
+        for (const field of cloudOwnedFields) if (field in fresh) merged[field] = fresh[field]
+        upserts.push(merged)
+      }
+      continue
+    }
     upserts.push({
       ...normalize(cloudRow, index),
       ...(localRow ? { id: localRow.id } : {}),

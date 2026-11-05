@@ -199,7 +199,10 @@ const stamp = (result) => ({
  */
 async function pushExport({ config, accessToken, state, key, xml, filename, extra = {}, force = false, label, countFn }) {
   const hash = sha256(xml)
-  if (!force && state.hashes[key] === hash) {
+  // "Unchanged" is only a hint: something else may have changed the database since (an older
+  // browser push, a restore). Re-send at least hourly so masters/balances always converge on Tally.
+  const stale = Date.now() - Number(state.pushedAt?.[key] || 0) > 3_600_000
+  if (!force && !stale && state.hashes[key] === hash) {
     console.log(`   ⏭️  ${label}: unchanged since last sync`)
     return 'unchanged'
   }
@@ -208,6 +211,7 @@ async function pushExport({ config, accessToken, state, key, xml, filename, extr
   const { ins, upd, skip } = stamp(result)
   console.log(`   ✅ ${label}: ${countFn(xml)} → ${ins} inserted, ${upd} updated, ${skip} unchanged`)
   state.hashes[key] = hash
+  state.pushedAt = { ...(state.pushedAt || {}), [key]: Date.now() }
   return 'ok'
 }
 
@@ -272,7 +276,13 @@ async function runSync(config, accessToken, { fromDate, toDate, force = false, s
   // 2. Ledgers
   console.log('\n📋 Pulling ledgers...')
   try {
-    const xml = await sendToTally(buildExportRequest('List of Accounts', company), config.tally)
+    // Closing balances are "as on" a date. Without one Tally uses whatever period is selected on its
+    // screen, so debtors froze at the last period the operator happened to view.
+    const asOf = new Date(`${toDate}T00:00:00`)
+    const xml = await sendToTally(buildExportRequest('List of Accounts', company, {
+      fromDate: financialYearStart(asOf, Number(process.env.FY_START_MONTH) || 4).replace(/-/g, ''),
+      toDate: toDate.replace(/-/g, ''),
+    }), config.tally)
     if (hasData(xml)) {
       await pushExport({ config, accessToken, state, key: 'masters', xml, filename: `tally-masters-${toDate}.xml`, extra: { groups }, force, label: 'Ledgers', countFn: (x) => `${countElements(x).ledgerCount} ledgers` })
     } else {

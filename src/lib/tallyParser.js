@@ -6,8 +6,8 @@ import {
   createStockItem,
   createVoucher,
   updateVoucher,
-} from './accountingDb'
-import { tallyLedgerCategory, tallyPartyType } from './tallyLedgerCategory'
+} from './accountingDb.js'
+import { tallyLedgerCategory, tallyPartyType } from './tallyLedgerCategory.js'
 
 /**
  * Tally Integration Engine
@@ -149,12 +149,17 @@ export function parseTallyXml(xmlText) {
   result.companyName = elementText(xmlDoc, 'SVCURRENTCOMPANY')
 
   // 1. Parse Ledgers (<LEDGER>)
-  const ledgerNodes = xmlDoc.getElementsByTagName('LEDGER')
+  const ledgerNodes = Array.from(xmlDoc.getElementsByTagName('LEDGER'))   // HTMLCollection has no forEach
   ledgerNodes.forEach((node) => {
     const name = node.getAttribute('NAME') || elementText(node, 'NAME')
     const parent = elementText(node, 'PARENT') || 'General'
-    const openingBal = Math.abs(numericValue(elementText(node, 'OPENINGBALANCE')))
-    const closingBalance = tallyNumber(elementText(node, 'CLOSINGBALANCE'))
+    // Tally's XML shows debits as negative. Store balances on the ledger's natural side so a customer
+    // advance or an overdrawn bank keeps its sign (this used Math.abs, which turned them into dues/cash).
+    const drNormal = ['asset', 'expense'].includes(tallyLedgerCategory(parent))
+    const natural = (value) => (value === null ? null : (drNormal ? -value : value))
+    const openingRaw = elementText(node, 'OPENINGBALANCE')
+    const openingBal = natural(openingRaw === '' ? 0 : tallyNumber(openingRaw)) ?? 0
+    const closingBalance = natural(tallyNumber(elementText(node, 'CLOSINGBALANCE')))
     const phone = elementText(node, 'LEDGERPHONE', 'PHONE')
     const email = elementText(node, 'EMAIL')
     const address = elements(node, ['ADDRESS.LIST'])
@@ -168,8 +173,8 @@ export function parseTallyXml(xmlText) {
         name,
         group: parent,
         opening_balance: openingBal,
-        current_balance: closingBalance === null ? openingBal : Math.abs(closingBalance),
-        closing_balance: closingBalance === null ? null : Math.abs(closingBalance),
+        current_balance: closingBalance === null ? openingBal : closingBalance,
+        closing_balance: closingBalance,
         category: tallyLedgerCategory(parent),
         phone,
         email,
@@ -180,7 +185,7 @@ export function parseTallyXml(xmlText) {
   })
 
   // 2. Parse Stock Items (<STOCKITEM>)
-  const stockNodes = xmlDoc.getElementsByTagName('STOCKITEM')
+  const stockNodes = Array.from(xmlDoc.getElementsByTagName('STOCKITEM'))   // HTMLCollection has no forEach
   stockNodes.forEach((node) => {
     const name = node.getAttribute('NAME') || elementText(node, 'NAME')
     const unit = elementText(node, 'BASEUNITS') || 'pcs'
@@ -212,7 +217,7 @@ export function parseTallyXml(xmlText) {
   })
 
   // 3. Parse Vouchers (<VOUCHER>)
-  const voucherNodes = xmlDoc.getElementsByTagName('VOUCHER')
+  const voucherNodes = Array.from(xmlDoc.getElementsByTagName('VOUCHER'))   // HTMLCollection has no forEach
   voucherNodes.forEach((node, idx) => {
     const rawType = (node.getAttribute('VCHTYPE') || elementText(node, 'VOUCHERTYPENAME', 'VOUCHERTYPE')).trim()
 
@@ -645,7 +650,7 @@ export async function importTallyDataToDb(parsedData) {
           if (existing) {
             await accDb.parties.update(existing.id, {
               opening_balance: openingBalance,
-              current_balance: Math.abs(currentBalance),
+              current_balance: currentBalance,
               phone: l.phone || existing.phone || '',
               email: l.email || existing.email || '',
               address: l.address || existing.address || '',
@@ -655,7 +660,7 @@ export async function importTallyDataToDb(parsedData) {
             await createDebtor({
               name: l.name,
               phone: l.phone || '',
-              current_balance: Math.abs(currentBalance),
+              current_balance: currentBalance,
               due_days: 15,
             })
             const created = await accDb.parties.where('name').equalsIgnoreCase(l.name.trim()).first()
@@ -667,7 +672,7 @@ export async function importTallyDataToDb(parsedData) {
           if (existing) {
             await accDb.parties.update(existing.id, {
               opening_balance: openingBalance,
-              current_balance: Math.abs(currentBalance),
+              current_balance: currentBalance,
               phone: l.phone || existing.phone || '',
               email: l.email || existing.email || '',
               address: l.address || existing.address || '',
@@ -677,7 +682,7 @@ export async function importTallyDataToDb(parsedData) {
             await createCreditor({
               name: l.name,
               phone: l.phone || '',
-              current_balance: Math.abs(currentBalance),
+              current_balance: currentBalance,
               due_days: 14,
               next_payment: 'Next month',
             })
@@ -693,7 +698,7 @@ export async function importTallyDataToDb(parsedData) {
               group: groupName,
               category,
               opening_balance: openingBalance,
-              current_balance: Math.abs(currentBalance),
+              current_balance: currentBalance,
             })
             updatedCount++
           } else {
@@ -702,7 +707,7 @@ export async function importTallyDataToDb(parsedData) {
               group: groupName,
               category,
               opening_balance: openingBalance,
-              current_balance: Math.abs(currentBalance),
+              current_balance: currentBalance,
             })
             newCount++
           }

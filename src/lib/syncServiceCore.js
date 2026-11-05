@@ -23,6 +23,7 @@ const CLOUD_ENTITIES = [
     cloudTable: 'parties',
     fields: ['name', 'type', 'uid', 'phone', 'email', 'address', 'opening_balance', 'current_balance'],
     naturalKey: (row) => `${row.type}|${String(row.name || '').trim().toLowerCase()}`,
+    cloudOwned: ['current_balance', 'opening_balance'],
     normalize: normalizeCloudParty,
   },
   {
@@ -31,6 +32,7 @@ const CLOUD_ENTITIES = [
     fields: ['name', 'group', 'primary_group', 'opening_balance', 'current_balance', 'is_system', 'category'],
     conflict: 'name',
     naturalKey: (row) => String(row.name || '').trim().toLowerCase(),
+    cloudOwned: ['current_balance', 'opening_balance', 'group', 'primary_group', 'category'],
     normalize: normalizeCloudLedger,
   },
   {
@@ -39,6 +41,7 @@ const CLOUD_ENTITIES = [
     fields: ['sku', 'name', 'category', 'unit', 'purchase_rate', 'sales_rate', 'current_qty', 'current_value', 'reorder_threshold'],
     conflict: 'sku',
     naturalKey: (row) => String(row.sku || '').trim().toLowerCase(),
+    cloudOwned: ['current_qty', 'current_value', 'purchase_rate'],
     normalize: normalizeCloudMaterial,
   },
   {
@@ -72,7 +75,7 @@ function parsePendingDeletes(value) {
 function applyPushResultsToSnapshot(cloudRows, pushResults, deleteIds, cloudTable) {
   const resultById = new Map(cloudRows.map((row) => [row.id, row]))
   for (const pushed of pushResults) {
-    if (pushed.cloudTable === cloudTable) resultById.set(pushed.cloudRow.id, pushed.cloudRow)
+    if (pushed.cloudTable === cloudTable) resultById.set(pushed.cloudRow.id, { ...resultById.get(pushed.cloudRow.id), ...pushed.cloudRow })
   }
   for (const deletedId of deleteIds) resultById.delete(deletedId)
   return [...resultById.values()]
@@ -206,7 +209,7 @@ export function createSyncService({
     return Promise.all(['parties', 'ledgers', 'materials', 'vouchers'].map(readCloudTable))
   }
 
-  async function pushLocalChanges(userId) {
+  async function pushLocalChanges(userId, { tallyManaged = false } = {}) {
     const { data: profile, error: profileError } = await cloud
       .from('profiles').select('role').eq('id', userId).maybeSingle()
     if (profileError) throw new Error(`Could not verify sync role: ${profileError.message}`)
@@ -215,13 +218,23 @@ export function createSyncService({
     }
     const deleteSetting = await database.settings.get('pending_cloud_deletes')
     const pendingDeletes = parsePendingDeletes(deleteSetting?.value)
-    if (profile.role !== 'admin') return { pushed: [], deleted: [], pendingDeletes, role: profile.role }
+    if (profile.role !== 'admin') return { pushed: [], deleted: [], pendingDeletes, failedDeletes: [], warnings: [], role: profile.role }
 
+    // One rejected row must never stop the rest: previously the first error aborted the whole sync, so
+    // the cloud's new balances were never applied and every debtor stayed frozen.
+    const warnings = []
+    const deleted = []
+    const failedDeletes = []
     for (const item of pendingDeletes) {
       const { error } = await cloud.from(item.table)
         .update({ deleted_at: now().toISOString() })
         .eq('id', item.cloud_id)
-      if (error) throw new Error(`Could not sync deleted ${item.table} record: ${error.message}`)
+      if (error) {
+        failedDeletes.push(item)
+        warnings.push(`Could not sync deleted ${item.table} record: ${error.message}`)
+      } else {
+        deleted.push(item)
+      }
     }
 
     const pushed = []
@@ -229,47 +242,57 @@ export function createSyncService({
       const table = database.table(entity.localTable)
       const dirtyRows = await table.filter((row) => row.local_dirty).toArray()
       for (const row of dirtyRows) {
-        const payload = Object.fromEntries(
-          entity.fields
-            .map((field) => [field, row[field]])
-            .filter(([, value]) => value !== undefined)
-        )
-        payload.deleted_at = null
-        if (entity.localTable === 'vouchers' && Array.isArray(payload.items)) {
-          payload.items = payload.items.map((item) => Object.fromEntries(Object.entries(item).filter(([key]) => key !== 'material_id')))
-        }
-        if (row.cloud_id) payload.id = row.cloud_id
+        const label = `${entity.cloudTable} ${row.voucher_no || row.name || row.sku || row.id}`
+        try {
+          const payload = Object.fromEntries(
+            entity.fields
+              .map((field) => [field, row[field]])
+              .filter(([, value]) => value !== undefined)
+          )
+          // When Tally is the source of truth, balances/stock already in the cloud belong to Tally.
+          // Pushing the browser's copy overwrote them with stale numbers.
+          if (tallyManaged && row.cloud_id && entity.cloudOwned) {
+            for (const field of entity.cloudOwned) delete payload[field]
+          }
+          payload.deleted_at = null
+          if (entity.localTable === 'vouchers' && Array.isArray(payload.items)) {
+            payload.items = payload.items.map((item) => Object.fromEntries(Object.entries(item).filter(([key]) => key !== 'material_id')))
+          }
+          if (row.cloud_id) payload.id = row.cloud_id
 
-        if (entity.localTable === 'parties' && !payload.id) {
-          const { data: existingParty, error } = await cloud.from('parties')
-            .select('id').eq('name', row.name).eq('type', row.type).limit(1).maybeSingle()
-          if (error) throw new Error(`Could not match party during sync: ${error.message}`)
-          if (existingParty) payload.id = existingParty.id
-        }
-        if (entity.localTable === 'vouchers' && !payload.id) {
-          const { data: existingVoucher, error } = await cloud.from('vouchers')
-            .select('id').eq('voucher_no', row.voucher_no).limit(1).maybeSingle()
-          if (error) throw new Error(`Could not match voucher during sync: ${error.message}`)
-          if (existingVoucher) payload.id = existingVoucher.id
-        }
+          if (entity.localTable === 'parties' && !payload.id) {
+            const { data: existingParty, error } = await cloud.from('parties')
+              .select('id').eq('name', row.name).eq('type', row.type).limit(1).maybeSingle()
+            if (error) throw new Error(`Could not match party during sync: ${error.message}`)
+            if (existingParty) payload.id = existingParty.id
+          }
+          if (entity.localTable === 'vouchers' && !payload.id) {
+            const { data: existingVoucher, error } = await cloud.from('vouchers')
+              .select('id').eq('voucher_no', row.voucher_no).limit(1).maybeSingle()
+            if (error) throw new Error(`Could not match voucher during sync: ${error.message}`)
+            if (existingVoucher) payload.id = existingVoucher.id
+          }
 
-        const options = entity.conflict ? { onConflict: entity.conflict } : undefined
-        const { data, error } = await cloud.from(entity.cloudTable)
-          .upsert(payload, options).select('*').single()
-        if (error) throw new Error(`Could not sync ${entity.cloudTable} record: ${error.message}`)
-        if (!data?.id) throw new Error(`Could not sync ${entity.cloudTable} record: cloud ID was missing.`)
-        pushed.push({
-          localTable: entity.localTable,
-          cloudTable: entity.cloudTable,
-          localId: row.id,
-          localRevision: Number(row.local_revision) || 0,
-          cloudId: data.id,
-          cloudRow: data,
-        })
+          const options = entity.conflict ? { onConflict: entity.conflict } : undefined
+          const { data, error } = await cloud.from(entity.cloudTable)
+            .upsert(payload, options).select('*').single()
+          if (error) throw new Error(error.message)
+          if (!data?.id) throw new Error('cloud ID was missing.')
+          pushed.push({
+            localTable: entity.localTable,
+            cloudTable: entity.cloudTable,
+            localId: row.id,
+            localRevision: Number(row.local_revision) || 0,
+            cloudId: data.id,
+            cloudRow: data,
+          })
+        } catch (error) {
+          warnings.push(`${label}: ${error.message}`)
+        }
       }
     }
 
-    return { pushed, deleted: pendingDeletes, pendingDeletes, role: profile.role }
+    return { pushed, deleted, pendingDeletes, failedDeletes, warnings, role: profile.role }
   }
 
   async function performCloudSync({ onlyIfChanged = false } = {}) {
@@ -293,7 +316,8 @@ export function createSyncService({
 
       // Read and validate every cloud table before changing local state or pushing edits.
       const [parties, ledgers, materials, vouchers] = await readCloudSnapshot()
-      const { pushed, deleted, pendingDeletes, role } = await pushLocalChanges(user.id)
+      const tallyManaged = vouchers.some((row) => row?.source_system === 'tally')
+      const { pushed, deleted, pendingDeletes, failedDeletes, warnings, role } = await pushLocalChanges(user.id, { tallyManaged })
 
       const cloudByTable = {
         parties: applyPushResultsToSnapshot(parties, pushed, deleted.filter((item) => item.table === 'parties').map((item) => item.cloud_id), 'parties'),
@@ -333,6 +357,7 @@ export function createSyncService({
               suppressedIds.get(entity.cloudTable),
               remoteDeletedIds.get(entity.cloudTable),
               entity.naturalKey,
+              tallyManaged ? entity.cloudOwned || [] : [],
             )
             return Promise.all([
               plan.upserts.length ? table.bulkPut(plan.upserts) : Promise.resolve(),
@@ -344,9 +369,11 @@ export function createSyncService({
         setRemoteSnapshot(false)
       }
 
-      if (deleted.length) {
-        await database.settings.put({ key: 'pending_cloud_deletes', value: '[]' })
+      if (deleted.length || failedDeletes.length) {
+        await database.settings.put({ key: 'pending_cloud_deletes', value: JSON.stringify(failedDeletes) })
       }
+      await database.settings.put({ key: 'cloud_sync_warnings', value: JSON.stringify(warnings) })
+      for (const warning of warnings) logError('Sync warning:', warning)
 
       const settingsChanged = (await pullSharedSettings(role)) || (await pullPnl())
       if (cloudVersion) await database.settings.put({ key: 'cloud_data_version', value: cloudVersion })
@@ -364,6 +391,7 @@ export function createSyncService({
           vouchers: cloudByTable.vouchers.filter((row) => !row.deleted_at).length,
         },
         lastSync: nowIso,
+        warnings,
       }
     } catch (error) {
       logError('syncFromSupabase error:', error)

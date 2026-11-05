@@ -20,9 +20,9 @@ export function sha256(text) {
 export function loadState(file = STATE_FILE) {
   try {
     const parsed = JSON.parse(readFileSync(file, 'utf-8'))
-    return { lastFullSyncDate: parsed.lastFullSyncDate || null, hashes: parsed.hashes || {} }
+    return { lastFullSyncDate: parsed.lastFullSyncDate || null, hashes: parsed.hashes || {}, pushedAt: parsed.pushedAt || {}, lastPnlAt: parsed.lastPnlAt || null }
   } catch {
-    return { lastFullSyncDate: null, hashes: {} }
+    return { lastFullSyncDate: null, hashes: {}, pushedAt: {}, lastPnlAt: null }
   }
 }
 

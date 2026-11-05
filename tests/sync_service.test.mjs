@@ -63,7 +63,8 @@ class MockQuery {
       const id = this.payload.id || `cloud-${this.table}-${this.client.upserts.length + 1}`
       const row = { ...this.payload, id }
       this.client.upserts.push({ table: this.table, payload: this.payload, row })
-      await this.client.onUpsert({ table: this.table, payload: this.payload, row })
+      const verdict = await this.client.onUpsert({ table: this.table, payload: this.payload, row })
+      if (verdict?.error) return { data: null, error: verdict.error }
       return { data: row, error: null }
     }
     if (this.mode === 'update') {
@@ -424,5 +425,46 @@ describe("Tally's Profit & Loss reaches the device", () => {
     const service = createSyncService({ cloud, database, isConfigured: true, dispatchUpdates: () => {}, logError: () => {} })
     await service.syncFromSupabase()
     assert.deepEqual(JSON.parse((await database.settings.get('tally_pnl')).value), rows)
+  })
+})
+
+
+describe('debtors keep following Tally', () => {
+  const tallyVoucher = { id: 'v-1', voucher_no: 'Sales-1', voucher_type: 'sales', date: '2026-10-30', amount: 10, source_system: 'tally' }
+  const snapshot = (partyBalance) => ({
+    accounting_refresh_state: { data: { last_data_change_at: `v${partyBalance}` }, error: null },
+    parties: { data: [{ id: 'p-1', name: 'Acme', type: 'debtor', phone: '', current_balance: partyBalance }], error: null },
+    ledgers: { data: [], error: null }, materials: { data: [], error: null }, vouchers: { data: [tallyVoucher], error: null },
+  })
+  const dirtyAcme = { id: 1, cloud_id: 'p-1', name: 'Acme', type: 'debtor', phone: '111', current_balance: 999, local_dirty: true, local_revision: 1 }
+  const build = (database, cloud) => createSyncService({ cloud, database, isConfigured: true, dispatchUpdates: () => {}, logError: () => {} })
+
+  it("a browser edit must not overwrite the balance Tally wrote, but its other edits still sync", async () => {
+    const database = new MemoryDatabase({ ...emptyTables(), parties: [dirtyAcme] }, [{ key: 'pending_cloud_deletes', value: '[]' }])
+    const cloud = mockCloud({ role: 'admin', snapshot: snapshot(5000) })
+    await build(database, cloud).syncFromSupabase()
+    const sent = cloud.upserts.find((u) => u.table === 'parties')
+    assert.equal(sent.payload.phone, '111')                          // the phone edit is pushed
+    assert.equal('current_balance' in sent.payload, false)           // the stale balance is not
+    assert.equal(database.table('parties').rows[0].current_balance, 5000)
+  })
+
+  it('a dirty debtor still receives Tally\'s latest balance', async () => {
+    const database = new MemoryDatabase({ ...emptyTables(), parties: [dirtyAcme] }, [{ key: 'pending_cloud_deletes', value: '[]' }])
+    // owner devices never push, so the dirty row used to be skipped and stay frozen
+    const cloud = mockCloud({ role: 'owner', snapshot: snapshot(7300) })
+    await build(database, cloud).syncFromSupabase()
+    assert.equal(database.table('parties').rows[0].current_balance, 7300)
+    assert.equal(database.table('parties').rows[0].phone, '111')     // the local edit is kept
+  })
+
+  it('one row the cloud rejects does not stop every other debtor from updating', async () => {
+    const poison = { id: 9, voucher_no: 'LOCAL-1', voucher_type: 'sales', date: '2026-10-30', amount: 1, local_dirty: true, local_revision: 1 }
+    const database = new MemoryDatabase({ ...emptyTables(), vouchers: [poison] }, [{ key: 'pending_cloud_deletes', value: '[]' }])
+    const cloud = mockCloud({ role: 'admin', snapshot: snapshot(6400), onUpsert: ({ table }) => (table === 'vouchers' ? { error: { message: 'violates check constraint' } } : undefined) })
+    const result = await build(database, cloud).syncFromSupabase()
+    assert.equal(result.success, true)
+    assert.equal(database.table('parties').rows[0].current_balance, 6400)
+    assert.match(result.warnings[0], /LOCAL-1.*violates check constraint/)
   })
 })
