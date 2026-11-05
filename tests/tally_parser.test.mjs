@@ -118,6 +118,19 @@ describe('ledger balances keep their side', () => {
     assert.equal(resolveRootGroup('Retail Customers', groups), 'Sundry Debtors')
   })
 
+  it('resolves creditors and debtors through full Tally hierarchy stopping at functional roots', () => {
+    const fullGroups = {
+      'Suppliers': 'Sundry Creditors',
+      'Sundry Creditors': 'Current Liabilities',
+      'Current Liabilities': 'Primary',
+      'Retail Customers': 'Sundry Debtors',
+      'Sundry Debtors': 'Current Assets',
+      'Current Assets': 'Primary',
+    }
+    assert.equal(resolveRootGroup('Suppliers', fullGroups), 'Sundry Creditors')
+    assert.equal(resolveRootGroup('Retail Customers', fullGroups), 'Sundry Debtors')
+  })
+
   it('customer who owes us is positive, one who prepaid is negative; overdrawn bank is negative', async () => {
     const ledger = (name, parent, closing) => `<LEDGER NAME="${name}"><PARENT>${parent}</PARENT><OPENINGBALANCE>0</OPENINGBALANCE><CLOSINGBALANCE>${closing}</CLOSINGBALANCE></LEDGER>`
     const { rows } = await parse(
@@ -140,6 +153,21 @@ describe('stock', () => {
     const { rows } = await parse('<STOCKITEM NAME="Widget"><CLOSINGBALANCE>-3 Nos</CLOSINGBALANCE><CLOSINGVALUE>-300.00</CLOSINGVALUE><CLOSINGRATE>100.00</CLOSINGRATE></STOCKITEM>')
     assert.equal(rows[0].payload.current_qty, -3)
     assert.equal(rows[0].payload.purchase_rate, 100)
+  })
+
+  it('parses stock summary XML item-wise quantity, rate, and positive value', async () => {
+    const summaryXml = `<ENVELOPE>
+<DSPACCNAME><DSPDISPNAME>Cotton Canvas</DSPDISPNAME></DSPACCNAME>
+<DSPSTKINFO><DSPSTKCL><DSPCLQTY>100 Pcs</DSPCLQTY><DSPCLRATE>50.00</DSPCLRATE><DSPCLAMTA>-5000.00</DSPCLAMTA></DSPSTKCL></DSPSTKINFO>
+</ENVELOPE>`
+    const { rows } = await parse(summaryXml)
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].rowType, 'stock_item')
+    assert.equal(rows[0].payload.name, 'Cotton Canvas')
+    assert.equal(rows[0].payload.current_qty, 100)
+    assert.equal(rows[0].payload.purchase_rate, 50)
+    assert.equal(rows[0].payload.current_value, 5000)
+    assert.equal(rows[0].payload.unit, 'Pcs')
   })
 })
 

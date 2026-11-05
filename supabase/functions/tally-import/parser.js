@@ -102,7 +102,11 @@ export const collectNamed = (object, wanted, output = []) => {
 }
 
 export const first = (object, keys) => {
-  for (const key of keys) if (object?.[key] != null && val(object[key]) !== '') return object[key]
+  for (const key of keys) {
+    if (object?.[key] != null) {
+      if (typeof object[key] === 'object' || val(object[key]) !== '') return object[key]
+    }
+  }
   return ''
 }
 
@@ -137,14 +141,26 @@ export function classifyVoucherType(name) {
 
 const clean = (text) => val(text).replace(/[\u0000-\u001f]/g, '').trim()
 
+const FUNCTIONAL_ROOTS = new Set([
+  'sundry debtors', 'sundry creditors', 'bank accounts', 'cash-in-hand',
+  'deposits (asset)', 'loans & advances (asset)', 'stock-in-hand',
+  'duties & taxes', 'provisions', 'bank od a/c', 'secured loans',
+  'unsecured loans', 'reserves & surplus', 'direct expenses', 'indirect expenses',
+  'purchase accounts', 'direct incomes', 'indirect incomes', 'sales accounts',
+  'fixed assets', 'investments', 'capital account', 'loans (liability)',
+  'branch / divisions', 'misc. expenses (asset)', 'suspense a/c',
+])
+
 /** Walk a group up to its primary (reserved) group using a {name: parent} map. */
 export function resolveRootGroup(group, groupParents = {}) {
   const lookup = new Map(Object.entries(groupParents).map(([name, parent]) => [clean(name).toLowerCase(), clean(parent)]))
   let current = clean(group)
+  if (FUNCTIONAL_ROOTS.has(current.toLowerCase())) return current
   for (let hops = 0; hops < 25; hops += 1) {
     const parent = lookup.get(current.toLowerCase())
     if (!parent || /^primary$/i.test(parent) || parent.toLowerCase() === current.toLowerCase()) return current
     current = parent
+    if (FUNCTIONAL_ROOTS.has(current.toLowerCase())) return current
   }
   return current
 }
@@ -342,12 +358,13 @@ export async function parseTallyXml(text, company, deps, options = {}) {
   for (let index = 0; index < Math.min(summaryNames.length, summaryInfo.length); index += 1) {
     const name = val(first(summaryNames[index], ['DSPDISPNAME']))
     if (!name) continue
-    const closing = first(summaryInfo[index], ['DSPSTKCL'])
+    const closing = summaryInfo[index]?.DSPSTKCL || first(summaryInfo[index], ['DSPSTKCL'])
     if (!closing || typeof closing !== 'object') continue
     const quantityText = val(first(closing, ['DSPCLQTY']))
     const quantity = maybeSigned(quantityText)
     const rateText = val(first(closing, ['DSPCLRATE']))
-    const value = maybeSigned(first(closing, ['DSPCLAMTA']))
+    const rawVal = maybeSigned(first(closing, ['DSPCLAMTA']))
+    const value = rawVal !== null ? Math.abs(rawVal) : null
     const unit = quantityText.match(/\s+([\p{L}][\p{L} ._-]*)\s*$/u)?.[1]?.trim()
     rows.push({ rowType: 'stock_item', payload: {
       name, sku: await skuFor(name),

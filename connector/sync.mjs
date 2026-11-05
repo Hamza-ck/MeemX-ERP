@@ -43,6 +43,7 @@ function parseCliArgs(argv) {
       'tally-port':   { type: 'string' },
       'tally-company':{ type: 'string' },
       file:           { type: 'string' },
+      force:          { type: 'boolean', default: false },
       help:           { type: 'boolean', short: 'h', default: false },
     },
     allowPositionals: true,
@@ -397,7 +398,7 @@ async function cmdPull(config, values) {
  * re-reads the whole current financial year and reconciles it, which self-heals edits
  * to old vouchers, deletions, and anything an earlier failed run missed.
  */
-async function cmdIncremental(config, _values) {
+async function cmdIncremental(config, values = {}) {
   const release = acquireLock()
   if (!release) {
     console.warn('⏳ Another sync is already running; skipping this one.')
@@ -445,7 +446,7 @@ async function cmdIncremental(config, _values) {
     }
     console.log(`   Pulling ${fromDate} → ${today}`)
 
-    const { failures } = await runSync(config, accessToken, { fromDate, toDate: today, force: needsDailyReconcile, state })
+    const { failures } = await runSync(config, accessToken, { fromDate, toDate: today, force: Boolean(needsDailyReconcile || values.force), state })
     if (failures === 0) {
       if (needsDailyReconcile) state.lastFullSyncDate = today
       saveState(state)
